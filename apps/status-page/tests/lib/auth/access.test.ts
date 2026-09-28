@@ -3,6 +3,7 @@ import type { AccessConfig } from '@flarewatch/shared';
 import { principalFor, type Identity } from '@/lib/auth/access';
 
 const access: AccessConfig = {
+  providers: [{ id: 'oidc', name: 'ID', issuer: 'https://id.example', clientId: 'flarewatch' }],
   operators: ['Owner@Example.com', 'group:admins'],
   members: ['*@team.example', 'github:Octocat'],
   audiences: {
@@ -24,7 +25,9 @@ function person(overrides: Partial<Extract<Identity, { kind: 'provider' }>> = {}
 
 describe('principalFor', () => {
   it('makes the password sign-in the operator', () => {
-    expect(principalFor({}, { kind: 'password' })).toEqual({ role: 'operator' });
+    expect(principalFor({}, { kind: 'password', secret: 'fingerprint' })).toEqual({
+      role: 'operator',
+    });
   });
 
   it('matches emails without regard to case, and groups exactly', () => {
@@ -67,6 +70,12 @@ describe('principalFor', () => {
       role: 'member',
       groups: ['Acme', 'Beta'],
     });
+  });
+
+  it('lets nobody in from a provider that is no longer configured', () => {
+    expect(
+      principalFor(access, person({ provider: 'removed', email: 'owner@example.com' })),
+    ).toBeNull();
   });
 
   it('lets nobody in who matches no rule', () => {

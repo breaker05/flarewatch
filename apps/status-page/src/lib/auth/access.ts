@@ -1,8 +1,11 @@
 import type { AccessConfig } from '@flarewatch/shared';
 
-/** Who signed in, as their provider vouched for them. */
 export type Identity =
-  | { kind: 'password' }
+  | {
+      kind: 'password';
+      /** A hash of the admin secret it signed in with, so a new password ends the session. */
+      secret: string;
+    }
   | {
       kind: 'provider';
       provider: string;
@@ -32,6 +35,7 @@ function matches(rule: string, identity: Extract<Identity, { kind: 'provider' }>
 /** Checked on every request, so removing someone from the config locks them out at once. */
 export function principalFor(access: AccessConfig, identity: Identity): Principal | null {
   if (identity.kind === 'password') return { role: 'operator' };
+  if (!access.providers?.some((provider) => provider.id === identity.provider)) return null;
   const any = (rules: string[] | undefined) =>
     (rules ?? []).some((rule) => matches(rule, identity));
 
