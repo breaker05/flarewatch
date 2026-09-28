@@ -13,7 +13,9 @@ function jsonError(status: number, message: string): Response {
 
 /** On a private-only page, what a visitor may still reach. Data server fns check for themselves. */
 function isOpenToVisitors(pathname: string): boolean {
-  return pathname === '/login' || pathname.startsWith('/_serverFn/');
+  return (
+    pathname === '/login' || pathname.startsWith('/auth/') || pathname.startsWith('/_serverFn/')
+  );
 }
 
 function isWriteMethod(method: string): boolean {
@@ -40,8 +42,8 @@ export async function authMiddlewareServer(
 
   const result = await authorize(opts);
   const env = await resolveRuntimeEnv();
-  // What the operator sees must never be stored by a shared cache.
-  if ((await resolveViewer(env, opts.request)) === 'operator') {
+  // What a signed-in person sees must never be stored by a shared cache.
+  if ((await resolveViewer(env, opts.request)) !== 'visitor') {
     const response = result instanceof Response ? result : result.response;
     response.headers.set('Cache-Control', 'private, no-store');
   }
