@@ -101,7 +101,6 @@ export function isPublicMonitor(monitor: Pick<MonitorTarget, 'private'>): boolea
 }
 
 export type WorkerConfig = {
-  kvWriteCooldownMinutes?: number;
   monitors: Monitor[];
   notification?: NotificationConfig;
   callbacks?: {
@@ -181,18 +180,7 @@ export type RuntimeConfig = {
   monitors: Monitor[];
   statusPage?: PageConfig;
   notification?: NotificationConfig;
-  kvWriteCooldownMinutes?: number;
 };
-
-export interface KvStore {
-  get(key: string, options?: { type?: 'json' | 'text' }): Promise<unknown>;
-  put(key: string, value: string): Promise<void>;
-}
-
-export const KV_KEYS = {
-  STATE: 'state',
-  MAINTENANCES: 'maintenances',
-} as const;
 
 export type HeartbeatRun = {
   /** Unix timestamp (seconds) */
@@ -222,9 +210,41 @@ export type HeartbeatState = HeartbeatSignal & {
   misses?: number[];
 };
 
-export function heartbeatKvKey(id: string): string {
-  return `hb:v1:${id}`;
-}
+/** A stretch of downtime. Each error change inside it starts a new segment. */
+export type Incident = {
+  /** Unix timestamps (seconds). One per error segment. */
+  start: number[];
+  /** Unix timestamp (seconds). Undefined while the incident is open. */
+  end?: number;
+  error: string[];
+};
+
+export type LatencySample = {
+  loc: string;
+  ping: number;
+  /** Unix timestamp (seconds) */
+  time: number;
+};
+
+/** One monitor as the hub knows it. Down means an open incident. */
+export type MonitorView = {
+  status: HeartbeatStatus;
+  /** Unix timestamp (seconds) of the first check result. */
+  startedAt?: number;
+  /** Oldest first, kept 90 days after they end. */
+  incidents: Incident[];
+  latest?: LatencySample;
+  heartbeat?: HeartbeatState;
+};
+
+export type StatusView = {
+  /** Unix timestamp (seconds) of the last check run; 0 before the first. */
+  lastUpdate: number;
+  monitors: Record<string, MonitorView>;
+};
+
+/** What the status page reads from the hub in one call. */
+export type HubView = StatusView & { maintenances: Maintenance[] };
 
 export type MonitorState = {
   /** Unix timestamp (seconds) */
@@ -295,16 +315,7 @@ export type CheckResult = CheckSuccess | CheckFailure;
 export interface CheckResultWithLocation {
   location: string;
   result: CheckResult;
-  heartbeat?: HeartbeatState;
 }
-
-export interface PendingHeartbeatCheckResult {
-  location: string;
-  result?: undefined;
-  heartbeat: HeartbeatState;
-}
-
-export type MonitorCheckResult = CheckResultWithLocation | PendingHeartbeatCheckResult;
 
 export interface CheckContext {
   /**
@@ -312,10 +323,6 @@ export interface CheckContext {
    * does not depend on the worker's Env type.
    */
   env: { FLAREWATCH_PROXY_TOKEN?: string };
-  /** Heartbeat signal storage, resolved once by the scheduler via getStateKv. */
-  stateKv?: KvStore;
-  /** Unix timestamp (seconds) for this check run; pull checkers ignore it. */
-  now: number;
 }
 
 export interface MonitorChecker {

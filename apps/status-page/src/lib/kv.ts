@@ -1,17 +1,11 @@
 import { createServerFn } from '@tanstack/react-start';
-import {
-  isMonitorState,
-  KV_KEYS,
-  type Maintenance,
-  type MonitorState,
-  readMaintenancesFromStorage,
-} from '@flarewatch/shared';
+import type { HubView, LatencySample } from '@flarewatch/shared';
 import { INITIAL_TRIGGER_RETRY_MS } from '@/lib/constants';
 import { getConfig, isPrivateOnly } from '@/lib/config';
+import { fetchHubView, fetchLatency } from '@/lib/hub';
 import { requireOperator } from '@/lib/operator.server';
-import { resolveMonitorState } from '@/lib/monitor-state';
-import { operatorSnapshot, visitorSnapshot, type Snapshot } from '@/lib/public-view';
-import { requireStateKv, resolveRuntimeEnv } from '@/lib/runtime-env';
+import { latencyAccess, operatorSnapshot, visitorSnapshot, type Snapshot } from '@/lib/public-view';
+import { resolveRuntimeEnv } from '@/lib/runtime-env';
 
 let initialTriggerPromise: Promise<boolean> | null = null;
 let lastTriggerAttempt = 0;
@@ -45,14 +39,32 @@ async function triggerInitialCheck(): Promise<boolean> {
   return initialTriggerPromise;
 }
 
-async function readMonitorState(): Promise<MonitorState | null> {
-  const kv = await requireStateKv();
-  const state: unknown = await kv.get(KV_KEYS.STATE, { type: 'json' });
-  return resolveMonitorState(isMonitorState(state) ? state : null, triggerInitialCheck);
+const VIEW_CACHE_MS = 20_000;
+let cachedView: { atMs: number; view: Promise<HubView> } | null = null;
+
+/** After a maintenance edit, so this isolate's visitors see it at once. */
+export function forgetCachedView(): void {
+  cachedView = null;
 }
 
-async function readMaintenances(): Promise<Maintenance[]> {
-  return readMaintenancesFromStorage(await requireStateKv());
+/**
+ * Visitors get a view reused for 20 s per isolate, so a busy page does not
+ * call the hub on every render. The operator always gets a fresh one, so a
+ * maintenance edit shows at once.
+ */
+async function readHubView(fresh: boolean): Promise<HubView> {
+  const nowMs = Date.now();
+  if (fresh || !cachedView || nowMs - cachedView.atMs > VIEW_CACHE_MS) {
+    const view = fetchHubView();
+    cachedView = { atMs: nowMs, view };
+    void view.catch(() => {
+      if (cachedView?.view === view) cachedView = null;
+    });
+  }
+  const view = await cachedView.view;
+  // A fresh deployment has no check run yet; start one instead of waiting for the cron.
+  if (view.lastUpdate === 0) await triggerInitialCheck();
+  return view;
 }
 
 function logAndFallback<T>(promise: Promise<T>, message: string, fallback: T): Promise<T> {
@@ -62,13 +74,10 @@ function logAndFallback<T>(promise: Promise<T>, message: string, fallback: T): P
   });
 }
 
-/** The visitor snapshot. KV failures degrade to empty data instead of an error page. */
+/** The visitor snapshot. A hub failure degrades to empty data instead of an error page. */
 export async function readVisitorSnapshot(): Promise<Snapshot> {
-  const [state, maintenances] = await Promise.all([
-    logAndFallback(readMonitorState(), 'Error fetching monitor state:', null),
-    logAndFallback(readMaintenances(), 'Error fetching maintenances:', []),
-  ]);
-  return visitorSnapshot(getConfig(), state, maintenances);
+  const view = await logAndFallback(readHubView(false), 'Error fetching monitor state:', null);
+  return visitorSnapshot(getConfig(), view, view?.maintenances ?? []);
 }
 
 /** A private-only page serves the visitor snapshot only to the operator's Visitor view. */
@@ -81,7 +90,18 @@ export const getVisitorSnapshot = createServerFn({ method: 'GET' }).handler(asyn
 export const getOperatorSnapshot = createServerFn({ method: 'GET' }).handler(
   async (): Promise<Snapshot> => {
     await requireOperator();
-    const [state, maintenances] = await Promise.all([readMonitorState(), readMaintenances()]);
-    return operatorSnapshot(getConfig(), state, maintenances);
+    const view = await readHubView(true);
+    return operatorSnapshot(getConfig(), view, view.maintenances);
   },
 );
+
+/** One monitor's latency, with the same audience rules as the snapshot it belongs to. */
+export const getMonitorLatency = createServerFn({ method: 'GET' })
+  .validator((input: { id: string }) => input)
+  .handler(async ({ data }): Promise<LatencySample[]> => {
+    const config = getConfig();
+    const access = latencyAccess(config, data.id, isPrivateOnly(config, await resolveRuntimeEnv()));
+    if (access === 'none') return [];
+    if (access === 'operator') await requireOperator();
+    return logAndFallback(fetchLatency(data.id), 'Error fetching latency:', []);
+  });
