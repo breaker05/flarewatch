@@ -1,9 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { isJsonObject } from '@flarewatch/shared';
-import { useTranslation } from 'react-i18next';
 import { qk } from './keys';
-
-const ADMIN_QUERY_KEYS = [qk.adminMonitors, qk.adminMonitorState, qk.adminMaintenances];
 
 type LoginCredentials = {
   username: string;
@@ -26,7 +23,6 @@ export function useAdminLogin(options?: {
   onSuccess?: () => void;
   onError?: (error: Error) => void;
 }) {
-  const { t } = useTranslation();
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -41,13 +37,13 @@ export function useAdminLogin(options?: {
         const payload: unknown = await res.json().catch(() => null);
         const message =
           isJsonObject(payload) && typeof payload.error === 'string' ? payload.error : undefined;
-        throw new Error(message ?? t('admin.loginFailed'));
+        throw new Error(message ?? 'Sign-in failed');
       }
 
       return { ok: true };
     },
     onSuccess: () => {
-      for (const queryKey of ADMIN_QUERY_KEYS) void queryClient.invalidateQueries({ queryKey });
+      void queryClient.invalidateQueries({ queryKey: qk.operatorSnapshot });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -65,7 +61,7 @@ export function useAdminLogout(options?: {
       await fetch('/api/admin/session', { method: 'DELETE' });
     },
     onSuccess: () => {
-      for (const queryKey of ADMIN_QUERY_KEYS) queryClient.removeQueries({ queryKey });
+      queryClient.removeQueries({ queryKey: qk.operatorSnapshot });
       options?.onSuccess?.();
     },
     onError: options?.onError,

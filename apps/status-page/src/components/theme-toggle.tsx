@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { IconSun, IconMoon, IconDeviceDesktop } from '@tabler/icons-react';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import type { ThemePreference } from '@/lib/theme-server';
@@ -50,7 +49,6 @@ const ThemeIcon = ({ theme }: { theme: ThemePreference }) => {
 };
 
 export function ThemeToggle({ initialTheme }: { initialTheme: ThemePreference }) {
-  const { t } = useTranslation();
   const [theme, setTheme] = useState<ThemePreference>(initialTheme);
 
   const cycleTheme = () => {
@@ -63,8 +61,7 @@ export function ThemeToggle({ initialTheme }: { initialTheme: ThemePreference })
     void setThemePreferenceServerFn({ data: next });
   };
 
-  const themeLabel =
-    theme === 'light' ? t('theme.light') : theme === 'dark' ? t('theme.dark') : t('theme.system');
+  const themeLabel = theme === 'light' ? 'Light' : theme === 'dark' ? 'Dark' : 'System';
 
   return (
     <Tooltip>
@@ -73,7 +70,7 @@ export function ThemeToggle({ initialTheme }: { initialTheme: ThemePreference })
           <button
             type="button"
             onClick={cycleTheme}
-            className="text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 transition-colors"
+            className="text-muted-foreground hover:text-foreground transition-colors"
             aria-label={themeLabel}
           >
             <ThemeIcon theme={theme} />

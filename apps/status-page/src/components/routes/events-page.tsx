@@ -1,6 +1,5 @@
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { getRouteApi } from '@tanstack/react-router';
-import { useTranslation } from 'react-i18next';
 import { IconChevronLeft, IconChevronRight, IconCalendar } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
 import { MonthPicker } from '@/components/ui/month-picker';
@@ -15,7 +14,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { UptimeCalendar } from '@/components/uptime-calendar/uptime-calendar';
 import { IncidentCard } from '@/components/events/incident-card';
 import { MaintenanceEventCard } from '@/components/events/maintenance-event-card';
-import { publicMonitorsQuery, monitorStateQuery } from '@/lib/query/monitors.queries';
+import { visitorSnapshotQuery } from '@/lib/query/monitors.queries';
 import { useNow } from '@/lib/hooks/use-now';
 import { shiftYearMonth, getUtcMonthBounds } from '@/lib/date';
 import { projectTimeline } from '@/lib/status-projection';
@@ -28,10 +27,10 @@ function getCurrentMonth(): string {
 }
 
 export function EventsPage() {
-  const { t } = useTranslation();
-  const { data: monitors } = useSuspenseQuery(publicMonitorsQuery());
-  const { data: state } = useSuspenseQuery(monitorStateQuery());
-  const { maintenances, loaderNowMs } = eventsRoute.useLoaderData();
+  const {
+    data: { monitors, state, maintenances },
+  } = useSuspenseQuery(visitorSnapshotQuery());
+  const { loaderNowMs } = eventsRoute.useLoaderData();
   const nowMs = useNow({ serverTime: loaderNowMs });
   const {
     month: selectedMonth,
@@ -58,23 +57,21 @@ export function EventsPage() {
   const nextMonth = shiftYearMonth(resolvedMonth, 1);
 
   const monitorOptions = [
-    { value: '', label: t('filter.all') },
+    { value: '', label: 'All' },
     ...monitors.map((m) => ({ value: m.id, label: m.name })),
   ];
 
   const typeOptions = [
-    { value: 'all', label: t('filter.allEvents') },
-    { value: 'incident', label: t('filter.incidents') },
-    { value: 'maintenance', label: t('filter.maintenances') },
+    { value: 'all', label: 'All events' },
+    { value: 'incident', label: 'Incidents' },
+    { value: 'maintenance', label: 'Maintenance windows' },
   ];
 
   return (
     <div className={PAGE_CONTAINER_CLASSES}>
       <div className="mb-4">
-        <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
-          {t('nav.events')}
-        </h1>
-        <p className="mt-1 text-sm text-neutral-500">{t('events.subtitle')}</p>
+        <h1 className="text-2xl font-bold text-foreground">Events</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Incidents and scheduled maintenance</p>
       </div>
 
       {state && <UptimeCalendar monitors={monitors} state={state} selectedMonth={resolvedMonth} />}
@@ -139,8 +136,7 @@ export function EventsPage() {
           >
             <SelectTrigger className="min-w-56">
               <SelectValue>
-                {monitorOptions.find((o) => o.value === (selectedMonitor ?? ''))?.label ??
-                  t('filter.all')}
+                {monitorOptions.find((o) => o.value === (selectedMonitor ?? ''))?.label ?? 'All'}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
@@ -159,15 +155,15 @@ export function EventsPage() {
           icon={IconCalendar}
           iconClassName="text-status-operational"
           iconContainerClassName="bg-status-operational-bg"
-          title={t('events.noEvents')}
-          description={t('events.noIncidentsOrMaintenance')}
+          title="No events this month"
+          description="No incidents or maintenance scheduled for this period."
         />
       ) : (
         <div className="space-y-4">
           {pinned.length > 0 && (
             <div className="space-y-3">
               <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {t('events.activeAndUpcoming')}
+                Active & Upcoming Maintenance
               </h3>
               {pinned.map((event) => (
                 <MaintenanceEventCard
@@ -182,7 +178,7 @@ export function EventsPage() {
 
           {timeline.length > 0 && (
             <div className="space-y-3">
-              {pinned.length > 0 && <hr className="border-neutral-200 dark:border-neutral-800" />}
+              {pinned.length > 0 && <hr className="border-border" />}
               {timeline.map((event) =>
                 event.type === 'incident' ? (
                   <IncidentCard
