@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vite-plus/test';
-import type { JsonValue } from '@flarewatch/shared';
+import { NOTIFICATION_TEMPLATES, type JsonValue } from '@flarewatch/shared';
 import { getTemplate } from '../../src/notifications/templates';
 import type { TemplateContext } from '../../src/notifications/templates/types';
 import { stripControlChars, singleLine } from '../../src/notifications/templates/format';
@@ -13,6 +13,7 @@ const baseContext: TemplateContext = {
   isInitialOutage: true,
   downtimeMinutes: 5,
   reason: 'Connection refused',
+  alsoDown: [],
   timestamp: '2025-01-15 12:00 UTC',
   timestampIso: '2025-01-15T12:00:00Z',
   incidentKey: 'test-monitor:1000',
@@ -377,4 +378,47 @@ describe('notification templates', () => {
     );
     expect(hasReasonUp).toBe(false);
   });
+
+  describe.each(NOTIFICATION_TEMPLATES)('%s', (name) => {
+    const render = (ctx: Partial<TemplateContext>) => {
+      const { body, headers } = getTemplate(name)({ ...baseContext, ...ctx });
+      return decodeURIComponent(`${JSON.stringify(headers)}${body}`.replaceAll('+', ' '));
+    };
+
+    it('names the monitors down behind a down monitor', () => {
+      expect(render({ alsoDown: ['App', 'Dashboard'] })).toMatch(/App`?, `?Dashboard/);
+      expect(render({ alsoDown: [] })).not.toContain('Also down');
+    });
+
+    it('shortens a long list to fit chat field limits', () => {
+      const names = Array.from(
+        { length: 60 },
+        (_, i) => `service-${String(i).padStart(2, '0')}-behind-proxy`,
+      );
+      const text = render({ alsoDown: names });
+
+      expect(text).toContain('service-00-behind-proxy');
+      expect(text).not.toContain('service-59-behind-proxy');
+      expect(text).toMatch(/and \d+ more/);
+    });
+
+    it('leaves the list out of an up alert', () => {
+      expect(
+        render({ isUp: true, isRecovery: true, isInitialOutage: false, alsoDown: ['App'] }),
+      ).not.toContain('Also down');
+    });
+  });
+
+  it.each(['discord', 'zulip'] as const)(
+    '%s puts each name behind the list in a code span, as it does the reason',
+    (name) => {
+      const { body } = getTemplate(name)({
+        ...baseContext,
+        alsoDown: ['@**all**', '[x](https://evil.example)'],
+      });
+      const text = decodeURIComponent(body.replaceAll('+', ' '));
+
+      expect(text).toContain('`@**all**`, `[x](https://evil.example)`');
+    },
+  );
 });
