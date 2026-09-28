@@ -11,11 +11,13 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
-import { Route as EventsRouteImport } from './routes/events'
+import { Route as HistoryRouteImport } from './routes/history'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as ApiBadgeRouteImport } from './routes/api/badge'
 import { Route as ApiDataRouteImport } from './routes/api/data'
 import { Route as ApiMaintenancesRouteImport } from './routes/api/maintenances'
 import { Route as EmbedMonitorIdRouteImport } from './routes/embed.$monitorId'
+import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors.$monitorId'
 import { Route as PingSplatRouteImport } from './routes/ping.$'
 import { Route as ApiAdminMaintenancesRouteImport } from './routes/api/admin/maintenances'
 import { Route as ApiAdminSessionRouteImport } from './routes/api/admin/session'
@@ -30,9 +32,14 @@ const AdminRoute = AdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => rootRouteImport,
 } as any)
-const EventsRoute = EventsRouteImport.update({
-  id: '/events',
-  path: '/events',
+const HistoryRoute = HistoryRouteImport.update({
+  id: '/history',
+  path: '/history',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiBadgeRoute = ApiBadgeRouteImport.update({
@@ -55,6 +62,11 @@ const EmbedMonitorIdRoute = EmbedMonitorIdRouteImport.update({
   path: '/embed/$monitorId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MonitorsMonitorIdRoute = MonitorsMonitorIdRouteImport.update({
+  id: '/monitors/$monitorId',
+  path: '/monitors/$monitorId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PingSplatRoute = PingSplatRouteImport.update({
   id: '/ping/$',
   path: '/ping/$',
@@ -74,11 +86,13 @@ const ApiAdminSessionRoute = ApiAdminSessionRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
-  '/events': typeof EventsRoute
+  '/history': typeof HistoryRoute
+  '/login': typeof LoginRoute
   '/api/badge': typeof ApiBadgeRoute
   '/api/data': typeof ApiDataRoute
   '/api/maintenances': typeof ApiMaintenancesRoute
   '/embed/$monitorId': typeof EmbedMonitorIdRoute
+  '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/ping/$': typeof PingSplatRoute
   '/api/admin/maintenances': typeof ApiAdminMaintenancesRoute
   '/api/admin/session': typeof ApiAdminSessionRoute
@@ -86,11 +100,13 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
-  '/events': typeof EventsRoute
+  '/history': typeof HistoryRoute
+  '/login': typeof LoginRoute
   '/api/badge': typeof ApiBadgeRoute
   '/api/data': typeof ApiDataRoute
   '/api/maintenances': typeof ApiMaintenancesRoute
   '/embed/$monitorId': typeof EmbedMonitorIdRoute
+  '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/ping/$': typeof PingSplatRoute
   '/api/admin/maintenances': typeof ApiAdminMaintenancesRoute
   '/api/admin/session': typeof ApiAdminSessionRoute
@@ -99,11 +115,13 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
-  '/events': typeof EventsRoute
+  '/history': typeof HistoryRoute
+  '/login': typeof LoginRoute
   '/api/badge': typeof ApiBadgeRoute
   '/api/data': typeof ApiDataRoute
   '/api/maintenances': typeof ApiMaintenancesRoute
   '/embed/$monitorId': typeof EmbedMonitorIdRoute
+  '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
   '/ping/$': typeof PingSplatRoute
   '/api/admin/maintenances': typeof ApiAdminMaintenancesRoute
   '/api/admin/session': typeof ApiAdminSessionRoute
@@ -113,11 +131,13 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/admin'
-    | '/events'
+    | '/history'
+    | '/login'
     | '/api/badge'
     | '/api/data'
     | '/api/maintenances'
     | '/embed/$monitorId'
+    | '/monitors/$monitorId'
     | '/ping/$'
     | '/api/admin/maintenances'
     | '/api/admin/session'
@@ -125,11 +145,13 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/admin'
-    | '/events'
+    | '/history'
+    | '/login'
     | '/api/badge'
     | '/api/data'
     | '/api/maintenances'
     | '/embed/$monitorId'
+    | '/monitors/$monitorId'
     | '/ping/$'
     | '/api/admin/maintenances'
     | '/api/admin/session'
@@ -137,11 +159,13 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/admin'
-    | '/events'
+    | '/history'
+    | '/login'
     | '/api/badge'
     | '/api/data'
     | '/api/maintenances'
     | '/embed/$monitorId'
+    | '/monitors/$monitorId'
     | '/ping/$'
     | '/api/admin/maintenances'
     | '/api/admin/session'
@@ -150,11 +174,13 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
-  EventsRoute: typeof EventsRoute
+  HistoryRoute: typeof HistoryRoute
+  LoginRoute: typeof LoginRoute
   ApiBadgeRoute: typeof ApiBadgeRoute
   ApiDataRoute: typeof ApiDataRoute
   ApiMaintenancesRoute: typeof ApiMaintenancesRoute
   EmbedMonitorIdRoute: typeof EmbedMonitorIdRoute
+  MonitorsMonitorIdRoute: typeof MonitorsMonitorIdRoute
   PingSplatRoute: typeof PingSplatRoute
   ApiAdminMaintenancesRoute: typeof ApiAdminMaintenancesRoute
   ApiAdminSessionRoute: typeof ApiAdminSessionRoute
@@ -176,11 +202,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/events': {
-      id: '/events'
-      path: '/events'
-      fullPath: '/events'
-      preLoaderRoute: typeof EventsRouteImport
+    '/history': {
+      id: '/history'
+      path: '/history'
+      fullPath: '/history'
+      preLoaderRoute: typeof HistoryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/badge': {
@@ -211,6 +244,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof EmbedMonitorIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/monitors/$monitorId': {
+      id: '/monitors/$monitorId'
+      path: '/monitors/$monitorId'
+      fullPath: '/monitors/$monitorId'
+      preLoaderRoute: typeof MonitorsMonitorIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/ping/$': {
       id: '/ping/$'
       path: '/ping/$'
@@ -238,11 +278,13 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
-  EventsRoute: EventsRoute,
+  HistoryRoute: HistoryRoute,
+  LoginRoute: LoginRoute,
   ApiBadgeRoute: ApiBadgeRoute,
   ApiDataRoute: ApiDataRoute,
   ApiMaintenancesRoute: ApiMaintenancesRoute,
   EmbedMonitorIdRoute: EmbedMonitorIdRoute,
+  MonitorsMonitorIdRoute: MonitorsMonitorIdRoute,
   PingSplatRoute: PingSplatRoute,
   ApiAdminMaintenancesRoute: ApiAdminMaintenancesRoute,
   ApiAdminSessionRoute: ApiAdminSessionRoute,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { IconWorld, IconClockPlay } from '@tabler/icons-react';
 import {
@@ -8,7 +8,7 @@ import {
   AccordionTrigger,
 } from '@/components/ui/accordion';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { MonitorCard } from '@/components/monitor-card';
+import { MonitorRow } from '@/components/monitor-card';
 import type { MonitorState, PageConfigGroup } from '@flarewatch/shared';
 import type { AdminMonitor } from '@/lib/public-view';
 import { setUiPrefsServerFn, type UiPrefs } from '@/lib/ui-prefs-server';
@@ -34,7 +34,7 @@ interface MonitorListProps {
   state: MonitorState;
   groups?: PageConfigGroup;
   uiPrefs?: UiPrefs;
-  pingUrlSlot?: (monitor: AdminMonitor) => ReactNode;
+  operator?: boolean;
   kind?: MonitorKindFilter;
   onKindChange?: (kind: MonitorKindFilter | undefined) => void;
 }
@@ -44,14 +44,11 @@ export function MonitorList({
   state,
   groups,
   uiPrefs,
-  pingUrlSlot,
+  operator,
   kind,
   onKindChange,
 }: MonitorListProps) {
   const queryClient = useQueryClient();
-  const [collapsedMonitors, setCollapsedMonitors] = useState<string[]>(
-    () => uiPrefs?.collapsedMonitors ?? [],
-  );
   const [collapsedGroups, setCollapsedGroups] = useState<string[]>(
     () => uiPrefs?.collapsedGroups ?? [],
   );
@@ -63,35 +60,18 @@ export function MonitorList({
       isInitialMount.current = false;
       return;
     }
-    const next = { collapsedGroups, collapsedMonitors };
+    const next = { collapsedGroups };
     queryClient.setQueryData(qk.uiPrefs, next);
     void setUiPrefsServerFn({ data: next });
-  }, [collapsedGroups, collapsedMonitors, queryClient]);
+  }, [collapsedGroups, queryClient]);
 
-  function onMonitorOpenChange(monitorId: string, open: boolean) {
-    setCollapsedMonitors((prev) => {
-      const nextSet = new Set(prev);
-      if (open) {
-        nextSet.delete(monitorId);
-      } else {
-        nextSet.add(monitorId);
-      }
-      return Array.from(nextSet);
-    });
-  }
-
-  function renderMonitorCard(monitor: AdminMonitor, index: number) {
+  function renderRows(rows: AdminMonitor[]) {
     return (
-      <MonitorCard
-        key={monitor.id}
-        monitor={monitor}
-        state={state}
-        open={!collapsedMonitors.includes(monitor.id)}
-        onOpenChange={(open) => onMonitorOpenChange(monitor.id, open)}
-        pingUrlSlot={pingUrlSlot?.(monitor)}
-        className="animate-fade-in-up opacity-0"
-        style={{ animationDelay: `${index * 30}ms` }}
-      />
+      <div className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+        {rows.map((monitor) => (
+          <MonitorRow key={monitor.id} monitor={monitor} state={state} operator={operator} />
+        ))}
+      </div>
     );
   }
 
@@ -173,12 +153,10 @@ export function MonitorList({
       )}
 
       {activeGroups.length === 0 ? (
-        <div className="space-y-2">{flatMonitors.map(renderMonitorCard)}</div>
+        renderRows(flatMonitors)
       ) : (
         <>
-          {flatMonitors.length > 0 && (
-            <div className="space-y-2">{flatMonitors.map(renderMonitorCard)}</div>
-          )}
+          {flatMonitors.length > 0 && renderRows(flatMonitors)}
 
           <Accordion
             multiple
@@ -207,7 +185,7 @@ export function MonitorList({
                     </div>
                   </AccordionTrigger>
                   <AccordionContent className="px-3 pb-3 pt-1.5">
-                    <div className="space-y-2">{groupMonitors.map(renderMonitorCard)}</div>
+                    {renderRows(groupMonitors)}
                   </AccordionContent>
                 </AccordionItem>
               );

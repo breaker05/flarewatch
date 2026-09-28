@@ -38,7 +38,7 @@ comment stating the checked invariant.
 
 - `services/worker` runs scheduled checks and writes state to KV (`FLAREWATCH_STATE` binding).
 - `apps/status-page` reads the same KV state and renders the UI on Cloudflare Workers.
-- `/admin` (optional) manages maintenances stored in the same KV under the `maintenances` key.
+- Signed in at `/login`, the operator sees private monitors and manages maintenances on `/history`. Maintenances live in the same KV under the `maintenances` key.
 - Optional external proxy (`https://github.com/saminnet/flarewatch-proxy`) executes checks from custom locations (private networks, TCP, SSL).
 
 ## Deployment Model
@@ -70,15 +70,14 @@ Required GitHub Actions secrets:
 Optional GitHub Actions secrets are uploaded with `wrangler secret put` when set:
 
 - `FLAREWATCH_PROXY_TOKEN`
-- `FLAREWATCH_STATUS_PAGE_BASIC_AUTH`
 - `FLAREWATCH_ADMIN_BASIC_AUTH`
 - `HEARTBEAT_SECRET` (root secret for heartbeat ping URLs; see
   [Heartbeat monitors](#heartbeat-monitors) in the README)
 
-Secrets are uploaded right after each `wrangler deploy`, so the very first deployment can serve traffic for a few seconds before basic auth is active. Removing a GitHub secret does not remove the Worker secret — delete it manually, for example:
+Secrets are uploaded right after each `wrangler deploy`, so the very first deployment can run for a few seconds before sign-in works. Removing a GitHub secret does not remove the Worker secret. Delete it by hand, for example:
 
 ```bash
-vp exec --filter status-page -- wrangler secret delete FLAREWATCH_STATUS_PAGE_BASIC_AUTH
+vp exec --filter status-page -- wrangler secret delete FLAREWATCH_ADMIN_BASIC_AUTH
 ```
 
 ## Deployment

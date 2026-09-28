@@ -2,26 +2,19 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { IconArrowLeft, IconLock } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
+import { buttonVariants } from '@/components/ui/button-variants';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Field, FieldLabel } from '@/components/ui/field';
 import { PAGE_CONTAINER_CLASSES } from '@/lib/constants';
-import { useAdminLogin } from '@/lib/query/auth.mutations';
+import { useSignIn } from '@/lib/query/auth.mutations';
 
-type AdminLoginFormProps = {
-  onLoginSuccess: () => void;
-};
-
-export function AdminLoginForm({ onLoginSuccess }: AdminLoginFormProps) {
+export function SignInForm({ privateOnly }: { privateOnly: boolean }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  const loginMutation = useAdminLogin({
-    onSuccess: () => {
-      setPassword('');
-      onLoginSuccess();
-    },
+  const loginMutation = useSignIn({
     onError: (error) => {
       setLoginError(error.message);
     },
@@ -38,9 +31,9 @@ export function AdminLoginForm({ onLoginSuccess }: AdminLoginFormProps) {
     <div className={PAGE_CONTAINER_CLASSES}>
       <div className="mx-auto w-full max-w-sm">
         <div className="mb-4 text-center">
-          <h1 className="text-2xl font-bold text-foreground">Admin sign-in</h1>
+          <h1 className="text-2xl font-bold text-foreground">Sign in</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Sign in to manage scheduled maintenance windows.
+            {privateOnly ? 'This status page is private.' : 'For the operator of this status page.'}
           </p>
         </div>
 
@@ -89,14 +82,14 @@ export function AdminLoginForm({ onLoginSuccess }: AdminLoginFormProps) {
           </form>
         </div>
 
-        <div className="mt-6 text-center">
-          <Link to="/">
-            <Button variant="ghost" size="sm">
-              <IconArrowLeft className="mr-2 h-4 w-4" />
+        {!privateOnly && (
+          <div className="mt-6 text-center">
+            <Link to="/" className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+              <IconArrowLeft />
               Go back
-            </Button>
-          </Link>
-        </div>
+            </Link>
+          </div>
+        )}
       </div>
     </div>
   );

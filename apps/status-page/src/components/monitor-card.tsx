@@ -1,15 +1,17 @@
 import type { ReactNode } from 'react';
-import { IconExternalLink, IconChevronDown, IconEyeOff } from '@tabler/icons-react';
+import { Link } from '@tanstack/react-router';
+import { IconExternalLink, IconChevronRight, IconEyeOff } from '@tabler/icons-react';
 import type { HeartbeatStatus } from '@flarewatch/shared';
 import { formatUtcShort } from '@flarewatch/shared';
 import { UPTIME_DAYS } from '@/lib/constants';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { StatusBar } from '@/components/status-bar';
 import { StatusIcon } from '@/components/status-icon';
 import { RunStrip } from '@/components/run-strip';
+import { CopyPingUrlButton } from '@/components/copy-ping-url-button';
+import { getHeartbeatPingUrl } from '@/lib/heartbeat-ping-url';
 import type { MonitorState } from '@flarewatch/shared';
 import { useMonitorStatus } from '@/lib/hooks/use-monitor-status';
 import type { AdminMonitor } from '@/lib/public-view';
@@ -19,16 +21,6 @@ import { formatCadence, formatDuration } from '@/lib/date';
 import { formatUptimeDisplay } from '@/lib/uptime';
 import { LatencyChart } from '@/components/latency-chart';
 import { cn } from '@/lib/utils';
-
-interface MonitorCardProps {
-  monitor: AdminMonitor;
-  state: MonitorState;
-  open: boolean;
-  onOpenChange?: (open: boolean) => void;
-  pingUrlSlot?: ReactNode;
-  className?: string;
-  style?: React.CSSProperties;
-}
 
 const PHASE_STATUS_LABELS: Record<HeartbeatStatus, string> = {
   up: 'operational',
@@ -164,9 +156,9 @@ function HeartbeatBody({
   return (
     <>
       <div className="mb-2 flex items-baseline justify-between gap-2">
-        <h4 className="text-xs font-medium text-muted-foreground">
+        <h2 className="text-xs font-medium text-muted-foreground">
           {runCount === 0 ? 'Runs' : `Last ${runCount} ${runCount === 1 ? 'run' : 'runs'}`}
-        </h4>
+        </h2>
         {monitor.periodSeconds !== undefined && (
           <span className="text-xs text-muted-foreground">
             {monitor.graceSeconds
@@ -213,7 +205,7 @@ function HeartbeatBody({
   );
 }
 
-function triggerLabel({
+function rowLabel({
   name,
   heartbeat,
   isUp,
@@ -226,27 +218,27 @@ function triggerLabel({
 }): string {
   if (!heartbeat) {
     const status = isUp ? 'operational' : 'not operational';
-    return `${name}, ${status}, ${uptime}. Click to toggle details`;
+    return `${name}, ${status}, ${uptime}`;
   }
 
   const status = PHASE_STATUS_LABELS[heartbeat.phase];
   if (heartbeat.lastRunSec === undefined || heartbeat.deadlineSec === undefined) {
-    return `${name}, ${status}, ${uptime}. Click to toggle details`;
+    return `${name}, ${status}, ${uptime}`;
   }
 
-  return `${name}, ${status}, last run ${formatUtcShort(heartbeat.lastRunSec)}, next expected by ${formatUtcShort(heartbeat.deadlineSec)}. Click to toggle details`;
+  return `${name}, ${status}, last run ${formatUtcShort(heartbeat.lastRunSec)}, next expected by ${formatUtcShort(heartbeat.deadlineSec)}`;
 }
 
 function MonitorSubLines({
   error,
   heartbeat,
   latency,
-  isAdminView,
+  operator,
 }: {
   error: string | null;
   heartbeat: HeartbeatView | null;
   latency: { ping: number; loc: string } | null;
-  isAdminView: boolean;
+  operator: boolean;
 }) {
   const lateDeadline = heartbeat?.phase === 'late' ? heartbeat.deadlineSec : undefined;
   const runningStart = heartbeat?.phase === 'running' ? heartbeat.startedSec : undefined;
@@ -258,7 +250,7 @@ function MonitorSubLines({
 
   return (
     <>
-      {error && !reportedFailure && !(overdueDeadline !== undefined && !isAdminView) && (
+      {error && !reportedFailure && !(overdueDeadline !== undefined && !operator) && (
         <p className="text-xs text-status-down-text line-clamp-2 wrap-break-word mt-0.5">{error}</p>
       )}
       {reportedFailure && (
@@ -266,7 +258,7 @@ function MonitorSubLines({
           Job reported failure
         </p>
       )}
-      {overdueDeadline !== undefined && !isAdminView && (
+      {overdueDeadline !== undefined && !operator && (
         <p className="text-xs text-status-down-text mt-0.5">
           {`Overdue, was expected by ${formatUtcShort(overdueDeadline)}`}
         </p>
@@ -300,29 +292,34 @@ function MonitorSubLines({
   );
 }
 
-function MonitorHeading({ monitor }: { monitor: AdminMonitor }) {
+function MonitorHeading({ monitor, detail }: { monitor: AdminMonitor; detail: boolean }) {
+  const Title = detail ? 'h1' : 'h3';
   return (
     <>
-      {monitor.link ? (
+      <Title
+        className={cn('min-w-0 font-medium text-foreground', detail && 'text-xl font-semibold')}
+      >
+        <span className={cn('wrap-break-word', !detail && 'line-clamp-2 sm:line-clamp-1')}>
+          {monitor.name}
+        </span>
+      </Title>
+      {detail && monitor.link && (
         <a
           href={monitor.link}
           target="_blank"
           rel="noopener noreferrer"
-          className="group relative z-20 flex items-start gap-1.5 font-medium text-foreground min-w-0 hover:underline"
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground hover:underline"
         >
-          <span className="line-clamp-2 wrap-break-word sm:line-clamp-1">{monitor.name}</span>
-          <IconExternalLink className="hidden sm:inline-flex h-3.5 w-3.5 shrink-0 text-muted-foreground group-hover:text-foreground" />
+          Open site
+          <IconExternalLink className="size-3.5" aria-hidden="true" />
+          <span className="sr-only">(opens in new tab)</span>
         </a>
-      ) : (
-        <h3 className="font-medium text-foreground min-w-0">
-          <span className="line-clamp-2 wrap-break-word sm:line-clamp-1">{monitor.name}</span>
-        </h3>
       )}
       {monitor.private && (
         <Badge variant="outline" className="shrink-0">
           <IconEyeOff className="size-3" aria-hidden="true" />
           Private
-          <span className="sr-only">{`${monitor.name} is private and never appears on the public page`}</span>
+          <span className="sr-only">{`${monitor.name} is private: visitors never see it`}</span>
         </Badge>
       )}
       {monitor.tooltip && (
@@ -373,22 +370,26 @@ function LatencyMeta({
   );
 }
 
-export function MonitorCard({
+interface MonitorViewProps {
+  monitor: AdminMonitor;
+  state: MonitorState;
+  operator?: boolean;
+}
+
+/**
+ * Status icon, name, current state and uptime: the part the row and the detail
+ * page share. In a row it also carries the link that covers the whole row.
+ */
+function MonitorSummary({
   monitor,
   state,
-  open,
-  onOpenChange,
-  pingUrlSlot,
-  className,
-  style,
-}: MonitorCardProps) {
+  operator = false,
+  detail,
+}: MonitorViewProps & { detail: boolean }) {
   const { isUp, uptimePercent, error, latency, statusColor } = useMonitorStatus(monitor.id, state);
   const heartbeat = deriveHeartbeat(monitor, state);
-
   const hasStarted = !!state.startedAt?.[monitor.id];
   const uptimeDisplay = formatUptimeDisplay(uptimePercent, hasStarted, 2);
-  const errorLine = !isUp && error ? error : null;
-  const isAdminView = pingUrlSlot !== undefined;
 
   const uptimeBadge = (
     <Badge
@@ -403,97 +404,113 @@ export function MonitorCard({
   );
 
   return (
-    <Card className={cn('@container overflow-hidden p-0', className)} style={style}>
-      <Collapsible open={open} onOpenChange={onOpenChange}>
-        <div className="relative hover:bg-muted/50 transition-colors">
-          <CollapsibleTrigger
-            nativeButton={false}
-            render={<div />}
-            className="absolute inset-0 z-10"
-            aria-label={triggerLabel({
-              name: monitor.name,
-              heartbeat,
-              isUp,
-              uptime: uptimeDisplay,
-            })}
-          />
+    <div
+      className="flex items-start gap-2.5"
+      style={{ viewTransitionName: `monitor-${monitor.id.replace(/[^\w-]/g, '_')}` }}
+    >
+      {!detail && (
+        <Link
+          to="/monitors/$monitorId"
+          params={{ monitorId: monitor.id }}
+          className="absolute inset-0 z-10 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
+          aria-label={rowLabel({ name: monitor.name, heartbeat, isUp, uptime: uptimeDisplay })}
+        />
+      )}
+      <div className="shrink-0 mt-0.5">
+        <StatusIcon isUp={isUp} phase={heartbeat?.phase} />
+      </div>
 
-          <div className="flex items-start gap-2.5 px-3 py-2">
-            <div className="shrink-0 mt-0.5">
-              <StatusIcon isUp={isUp} phase={heartbeat?.phase} />
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <div className="flex flex-wrap items-start gap-x-2 gap-y-1 min-w-0">
-                <MonitorHeading monitor={monitor} />
-              </div>
-
-              <MonitorSubLines
-                error={errorLine}
-                heartbeat={heartbeat}
-                latency={latency}
-                isAdminView={isAdminView}
-              />
-            </div>
-
-            <div className="flex h-5 shrink-0 items-center gap-2.5">
-              {heartbeat
-                ? heartbeat.phase !== 'pending' && (
-                    <div className="hidden @min-[641px]:block text-right text-xs whitespace-nowrap text-muted-foreground">
-                      <HeartbeatMeta heartbeat={heartbeat} />
-                    </div>
-                  )
-                : latency && <LatencyMeta isProxy={monitor.isProxy} latency={latency} />}
-
-              {heartbeat ? (
-                <Tooltip>
-                  <TooltipTrigger className="relative z-20 cursor-help">
-                    {uptimeBadge}
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Uptime samples this monitor once a minute with the cron run, not once per job
-                    run.
-                  </TooltipContent>
-                </Tooltip>
-              ) : (
-                uptimeBadge
-              )}
-
-              {pingUrlSlot && <div className="relative z-20 flex items-center">{pingUrlSlot}</div>}
-
-              <IconChevronDown
-                className={cn(
-                  'h-4 w-4 shrink-0 text-muted-foreground transition-transform',
-                  open && 'rotate-180',
-                )}
-              />
-            </div>
-          </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+          <MonitorHeading monitor={monitor} detail={detail} />
         </div>
 
-        <CollapsibleContent>
-          <div className="border-t border-border px-3 py-2 bg-muted/30">
-            {heartbeat ? (
-              <HeartbeatBody monitor={monitor} heartbeat={heartbeat} />
-            ) : (
-              <>
-                <h4 className="mb-2 text-xs font-medium text-muted-foreground">
-                  {`Last ${UPTIME_DAYS} days`}
-                </h4>
-                <StatusBar monitorId={monitor.id} monitorName={monitor.name} state={state} />
-                {open && !monitor.hideLatencyChart && (
-                  <div className="mt-4">
-                    <h4 className="mb-2 text-xs font-medium text-muted-foreground">
-                      Response times (ms)
-                    </h4>
-                    <LatencyChart monitor={monitor} state={state} />
-                  </div>
-                )}
-              </>
-            )}
+        <MonitorSubLines
+          error={!isUp && error ? error : null}
+          heartbeat={heartbeat}
+          latency={latency}
+          operator={operator}
+        />
+      </div>
+
+      <div className="flex h-5 shrink-0 items-center gap-2.5">
+        {heartbeat
+          ? heartbeat.phase !== 'pending' && (
+              <div className="hidden @min-[641px]:block text-right text-xs whitespace-nowrap text-muted-foreground">
+                <HeartbeatMeta heartbeat={heartbeat} />
+              </div>
+            )
+          : latency && <LatencyMeta isProxy={monitor.isProxy} latency={latency} />}
+
+        {heartbeat ? (
+          <Tooltip>
+            <TooltipTrigger className="relative z-20 cursor-help">{uptimeBadge}</TooltipTrigger>
+            <TooltipContent>
+              Uptime samples this monitor once a minute with the cron run, not once per job run.
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          uptimeBadge
+        )}
+
+        {!detail && <IconChevronRight className="size-4 shrink-0 text-muted-foreground" />}
+      </div>
+    </div>
+  );
+}
+
+/** One line in the monitor list; the whole row opens the monitor's page. */
+export function MonitorRow({ monitor, state, operator }: MonitorViewProps) {
+  return (
+    <div
+      data-slot="monitor-row"
+      className="@container relative px-3 py-2 transition-colors hover:bg-muted/50"
+    >
+      <MonitorSummary monitor={monitor} state={state} operator={operator} detail={false} />
+    </div>
+  );
+}
+
+/** Everything about one monitor, for its own page. */
+export function MonitorDetail({ monitor, state, operator = false }: MonitorViewProps) {
+  const heartbeat = deriveHeartbeat(monitor, state);
+
+  return (
+    <Card className="@container p-0">
+      <div className="px-4 pt-4">
+        <MonitorSummary monitor={monitor} state={state} operator={operator} detail />
+        {operator && monitor.method === 'HEARTBEAT' && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+            <CopyPingUrlButton
+              monitorId={monitor.id}
+              monitorName={monitor.name}
+              loadPingUrl={(id) => getHeartbeatPingUrl({ data: { id } })}
+            />
+            Ping URL for your job
           </div>
-        </CollapsibleContent>
-      </Collapsible>
+        )}
+      </div>
+
+      <div className="border-t border-border px-4 py-3">
+        {heartbeat ? (
+          <HeartbeatBody monitor={monitor} heartbeat={heartbeat} />
+        ) : (
+          <>
+            <h2 className="mb-2 text-xs font-medium text-muted-foreground">
+              {`Last ${UPTIME_DAYS} days`}
+            </h2>
+            <StatusBar monitorId={monitor.id} monitorName={monitor.name} state={state} />
+            {!monitor.hideLatencyChart && (
+              <div className="mt-4">
+                <h2 className="mb-2 text-xs font-medium text-muted-foreground">
+                  Response times (ms)
+                </h2>
+                <LatencyChart monitor={monitor} state={state} />
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </Card>
   );
 }

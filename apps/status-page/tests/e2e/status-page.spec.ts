@@ -1,5 +1,5 @@
 import { expect, test, type APIResponse, type Page } from '@playwright/test';
-import { isJsonObject, isValidMaintenance } from '@flarewatch/shared';
+import { isJsonObject } from '@flarewatch/shared';
 
 type SeededMonitor = {
   id: string;
@@ -65,7 +65,6 @@ const adminCredentials = {
 const adminAuthHeaders = {
   Authorization: `Basic ${btoa(`${adminCredentials.username}:${adminCredentials.password}`)}`,
 };
-const HOUR_MS = 60 * 60 * 1000;
 const privateMonitorFields = [
   'checkProxy',
   'expectedCodes',
@@ -139,6 +138,12 @@ test('seeded dashboard matches monitor data and supports collapse interactions',
 
   await expect(page).toHaveTitle(/FlareWatch/);
   await expect(page.getByRole('banner').getByRole('link', { name: /FlareWatch/ })).toBeVisible();
+  const nav = page.getByRole('navigation', { name: 'Main navigation' });
+  await expect(nav.getByRole('link')).toHaveText(['History']);
+  await expect(nav.getByRole('link', { name: 'History' })).not.toHaveAttribute('aria-current');
+  await expect(
+    page.getByRole('contentinfo').getByRole('link', { name: 'GitHub', exact: true }),
+  ).toHaveAttribute('href', 'https://github.com/saminnet/flarewatch');
   await expect(
     page.getByRole('heading', { name: /Some systems are down \(3 out of 12\)/i }),
   ).toBeVisible();
@@ -163,47 +168,68 @@ test('seeded dashboard matches monitor data and supports collapse interactions',
   for (const monitor of seededMonitors) {
     expect(getPublicMonitor(data, monitor.id).up).toBe(monitor.status === 'operational');
     await expect(
-      page.getByRole('button', {
-        name: new RegExp(`${monitor.name}, ${monitor.status}.*Click to toggle details`),
-      }),
+      page.getByRole('link', { name: new RegExp(`^${monitor.name}, ${monitor.status}, `) }),
     ).toBeVisible();
     if (monitor.latency) {
       await expect(page.getByText(monitor.latency).filter({ visible: true }).first()).toBeVisible();
     }
     if (monitor.error) await expect(page.getByText(monitor.error)).toBeVisible();
-    if (monitor.href) {
-      await expect(page.getByRole('link', { name: new RegExp(monitor.name) })).toHaveAttribute(
-        'href',
-        monitor.href,
-      );
-    }
   }
 
-  await expect(page.getByRole('heading', { name: 'Response times (ms)' }).first()).toBeVisible();
-  await expect(page.getByTestId('latency-chart').first()).toBeVisible();
+  // Rows stay one line: the history and the chart live on the monitor's page.
+  await expect(page.getByTestId('latency-chart')).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Toggle Websites (2 monitors)' }).click();
   await expect(page.getByRole('button', { name: 'Toggle Websites (2 monitors)' })).toHaveAttribute(
     'aria-expanded',
     'false',
   );
-  await expect(page.getByRole('button', { name: /Example Domain, operational/ })).not.toBeVisible();
+  await expect(page.getByRole('link', { name: /Example Domain, operational/ })).not.toBeVisible();
 
   await page.getByRole('button', { name: 'Toggle Websites (2 monitors)' }).click();
-  await expect(page.getByRole('button', { name: /Example Domain, operational/ })).toBeVisible();
+  await expect(page.getByRole('link', { name: /Example Domain, operational/ })).toBeVisible();
+  expect(clientErrors).toEqual([]);
+});
+
+test('a row opens the monitor page with its history and chart', async ({ page }) => {
+  const clientErrors = collectClientErrors(page);
+  await page.goto('/');
+  await page.getByRole('link', { name: /^Cloudflare Docs, operational, / }).click();
+
+  await expect(page).toHaveURL(/\/monitors\/demo_cloudflare_docs$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Cloudflare Docs' })).toBeVisible();
+  await expect(page.getByRole('link', { name: /Open site/ })).toHaveAttribute(
+    'href',
+    'https://developers.cloudflare.com/',
+  );
+  await expect(page.getByRole('heading', { name: 'Last 90 days' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Response times (ms)' })).toBeVisible();
+  await expect(page.getByTestId('latency-chart')).toBeVisible();
+
+  await expect(page.getByText('No incidents or maintenance in the last 90 days.')).toBeVisible();
+  await page.getByRole('link', { name: 'Full history' }).click();
+  await expect(page).toHaveURL(/\/history\?.*monitor=demo_cloudflare_docs/);
+
+  // Each page lists the monitor's own incidents and maintenance windows.
+  await page.goto('/monitors/demo_cloudflare_status');
+  const history = page.getByRole('region', { name: 'History' });
+  await expect(history.getByText('Synthetic E2E outage')).toBeVisible();
+  await expect(history.getByText('E2E active maintenance')).toHaveCount(0);
+  await page.goto('/monitors/demo_cloudflare_trace');
+  await expect(history.getByText('E2E active maintenance')).toBeVisible();
   expect(clientErrors).toEqual([]);
 });
 
 test('latency chart is server-rendered, labeled, and supports hover', async ({ page, request }) => {
   // SSR: the chart container and its SVG line/grid are in the raw server HTML, before any JS.
-  const html = await (await request.get('/')).text();
+  const html = await (await request.get('/monitors/demo_example')).text();
   expectNoPrivateMonitorFields(html);
   expect(html).toContain('data-testid="latency-chart"');
   expect(html).toContain('vector-effect="non-scaling-stroke"');
   expect(html).toMatch(/fill="url\(#chart-fill-/);
   expect(html).toContain('stop-opacity="var(--chart-fill-top)"');
 
-  await page.goto('/');
+  await page.goto('/monitors/demo_example');
   const chart = page.getByTestId('latency-chart').first();
   await chart.scrollIntoViewIfNeeded();
   await expect(chart).toBeVisible();
@@ -226,17 +252,15 @@ test('latency chart is server-rendered, labeled, and supports hover', async ({ p
   }).toPass({ timeout: 15_000 });
 });
 
-test('empty chart state renders in the trace card', async ({ page }) => {
-  await page.goto('/');
-  await expect(
-    monitorCard(page, 'Cloudflare Trace').getByText('No response data yet'),
-  ).toBeVisible();
+test('empty chart state renders on the trace page', async ({ page }) => {
+  await page.goto('/monitors/demo_cloudflare_trace');
+  await expect(page.getByText('No response data yet')).toBeVisible();
 });
 
 test.describe('latency chart touch', () => {
   test.use({ hasTouch: true });
   test('tooltip appears on touch press and clears on lift', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/monitors/demo_example');
     const chart = page.getByTestId('latency-chart').first();
     await chart.scrollIntoViewIfNeeded();
     await chart.waitFor({ state: 'visible' });
@@ -353,74 +377,56 @@ const privateHeartbeat = {
 
 const UTC_STAMP = String.raw`\w{3} \d{1,2}, \d{2}:\d{2} UTC`;
 
-function monitorCard(page: Page, name: string) {
+function monitorRow(page: Page, name: string) {
   return page
-    .locator('[data-slot="card"]')
-    .filter({ has: page.getByRole('button', { name: new RegExp(`^${name}, `) }) });
+    .locator('[data-slot="monitor-row"]')
+    .filter({ has: page.getByRole('link', { name: new RegExp(`^${name}, `) }) });
 }
 
 test('heartbeat monitors render every phase on the public page', async ({ page }) => {
   const clientErrors = collectClientErrors(page);
   await page.goto('/');
 
-  const upCard = monitorCard(page, 'Nightly Backup');
   await expect(
-    page.getByRole('button', {
+    page.getByRole('link', {
       name: new RegExp(
-        `Nightly Backup, operational, last run ${UTC_STAMP}, next expected by ${UTC_STAMP}\\. Click to toggle details`,
+        `^Nightly Backup, operational, last run ${UTC_STAMP}, next expected by ${UTC_STAMP}$`,
       ),
     }),
   ).toBeVisible();
-  await expect(upCard).toContainText(new RegExp(`last run ${UTC_STAMP}`));
-  await expect(upCard.getByText('Last 2 runs')).toBeVisible();
-  await expect(upCard.getByText('Every 24h, 30m grace', { exact: true })).toBeVisible();
-  await expect(upCard.getByText('Next due', { exact: true })).toBeVisible();
-  const strip = upCard.getByRole('group', {
-    name: /\d+ runs, \d+ missed, \d+ failed, last run/,
-  });
-  await expect(strip).toBeVisible();
-  await expect(upCard.locator('time').first()).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/);
-
-  const lateCard = monitorCard(page, 'Hourly Report');
+  await expect(monitorRow(page, 'Nightly Backup')).toContainText(
+    new RegExp(`last run ${UTC_STAMP}`),
+  );
   await expect(
-    page.getByRole('button', { name: /Hourly Report, running late, last run/ }),
+    page.getByRole('link', { name: /Hourly Report, running late, last run/ }),
   ).toBeVisible();
-  await expect(lateCard).toContainText(new RegExp(`Running late, expected by ${UTC_STAMP}`));
-
-  const pendingCard = monitorCard(page, 'Weekly Prune');
+  await expect(monitorRow(page, 'Hourly Report')).toContainText(
+    new RegExp(`Running late, expected by ${UTC_STAMP}`),
+  );
   await expect(
-    page.getByRole('button', { name: /Weekly Prune, waiting for first ping/ }),
+    page.getByRole('link', { name: /Weekly Prune, waiting for first ping/ }),
   ).toBeVisible();
-  await expect(pendingCard).toContainText('Waiting for first ping');
+  await expect(monitorRow(page, 'Weekly Prune')).toContainText('Waiting for first ping');
+  await expect(monitorRow(page, 'Weekly Prune').locator('[data-slot="badge"]')).toHaveText(
+    'Pending',
+  );
+  await expect(monitorRow(page, 'Index Rebuild')).toContainText(
+    new RegExp(`Running since ${UTC_STAMP}`),
+  );
+  await expect(page.getByRole('link', { name: /Log Shipper, overdue/ })).toBeVisible();
+  await expect(monitorRow(page, 'Log Shipper')).toContainText(
+    new RegExp(`Overdue, was expected by ${UTC_STAMP}`),
+  );
+  await expect(monitorRow(page, 'Log Shipper')).not.toContainText(
+    /No heartbeat since .+ \(expected by .+\)/,
+  );
   await expect(
-    pendingCard.getByText('No run recorded yet. The first ping starts the schedule.'),
+    page.getByRole('link', { name: /Nightly Compactor, overdue, last run/ }),
   ).toBeVisible();
-  await expect(pendingCard.locator('[data-slot="badge"]')).toHaveText('Pending');
+  await expect(monitorRow(page, 'Nightly Compactor')).toContainText('Job reported failure');
 
-  const runningCard = monitorCard(page, 'Index Rebuild');
-  await expect(runningCard).toContainText(new RegExp(`Running since ${UTC_STAMP}`));
-
-  const downCard = monitorCard(page, 'Log Shipper');
-  await expect(page.getByRole('button', { name: /Log Shipper, overdue/ })).toBeVisible();
-  await expect(downCard).toContainText(new RegExp(`Overdue, was expected by ${UTC_STAMP}`));
-  await expect(downCard).not.toContainText(/No heartbeat since .+ \(expected by .+\)/);
-  await expect(downCard.getByText('Overdue by', { exact: true })).toBeVisible();
-
-  const failedCard = monitorCard(page, 'Nightly Compactor');
-  await expect(
-    page.getByRole('button', { name: /Nightly Compactor, overdue, last run/ }),
-  ).toBeVisible();
-  await expect(failedCard).toContainText('Job reported failure');
-  await expect(failedCard.getByText('restic check failed')).toHaveCount(0);
-
-  // The compactor fixture carries the full 90-run history with the miss
-  // stored in state.misses, merged into the strip next to the ping runs.
-  await expect(
-    failedCard.getByRole('group', { name: /90 runs, 1 missed, 1 failed, last run/ }),
-  ).toBeVisible();
-
-  // The uptime badge samples cron minutes, so heartbeat cards explain it.
-  const uptimeBadgeTooltip = upCard
+  // The uptime badge samples cron minutes, so heartbeat rows explain it.
+  const uptimeBadgeTooltip = monitorRow(page, 'Nightly Backup')
     .locator('[data-slot="tooltip-trigger"]')
     .filter({ has: page.locator('[data-slot="badge"]') });
   await expect(async () => {
@@ -430,6 +436,33 @@ test('heartbeat monitors render every phase on the public page', async ({ page }
       timeout: 1000,
     });
   }).toPass({ timeout: 15_000 });
+
+  await page.goto('/monitors/demo_nightly_backup');
+  const upCard = page.locator('[data-slot="card"]');
+  await expect(upCard.getByText('Last 2 runs')).toBeVisible();
+  await expect(upCard.getByText('Every 24h, 30m grace', { exact: true })).toBeVisible();
+  await expect(upCard.getByText('Next due', { exact: true })).toBeVisible();
+  await expect(
+    upCard.getByRole('group', { name: /\d+ runs, \d+ missed, \d+ failed, last run/ }),
+  ).toBeVisible();
+  await expect(upCard.locator('time').first()).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/);
+  await expect(page.getByRole('button', { name: /Copy ping URL/ })).toHaveCount(0);
+
+  await page.goto('/monitors/demo_weekly_prune');
+  await expect(
+    page.getByText('No run recorded yet. The first ping starts the schedule.'),
+  ).toBeVisible();
+
+  await page.goto('/monitors/demo_log_shipper');
+  await expect(page.getByText('Overdue by', { exact: true })).toBeVisible();
+
+  // The compactor fixture carries the full 90-run history with the miss
+  // stored in state.misses, merged into the strip next to the ping runs.
+  await page.goto('/monitors/demo_nightly_compactor');
+  await expect(
+    page.getByRole('group', { name: /90 runs, 1 missed, 1 failed, last run/ }),
+  ).toBeVisible();
+  await expect(page.getByText('restic check failed')).toHaveCount(0);
 
   expect(clientErrors).toEqual([]);
 });
@@ -446,26 +479,26 @@ test('kind filter hides the other kind and lives in the URL', async ({ page }) =
     await filter.getByRole('button', { name: 'Websites' }).click();
     await expect(page).toHaveURL(/kind=web/);
   }).toPass({ timeout: 15_000 });
-  await expect(page.getByRole('button', { name: /Nightly Backup, / })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /Nightly Backup, / })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Toggle Scheduled jobs (6 jobs)' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: /Example Domain, operational/ })).toBeVisible();
+  await expect(page.getByRole('link', { name: /Example Domain, operational/ })).toBeVisible();
   await expect(
     page.getByRole('heading', { name: /Some systems are down \(3 out of 12\)/i }),
   ).toBeVisible();
 
   await page.goto('/?kind=jobs');
-  await expect(page.getByRole('button', { name: /Example Domain, operational/ })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /Example Domain, operational/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Toggle Websites (2 monitors)' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Toggle APIs (2 monitors)' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Toggle Status Feeds (2 monitors)' })).toHaveCount(
     0,
   );
   await expect(page.getByRole('button', { name: 'Toggle Scheduled jobs (6 jobs)' })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Nightly Backup, / })).toBeVisible();
+  await expect(page.getByRole('link', { name: /Nightly Backup, / })).toBeVisible();
   expect(clientErrors).toEqual([]);
 });
 
-async function signInAsAdmin(page: Page): Promise<void> {
+async function signIn(page: Page): Promise<void> {
   await page.evaluate(async (credentials) => {
     const response = await fetch('/api/admin/session', {
       method: 'POST',
@@ -473,12 +506,12 @@ async function signInAsAdmin(page: Page): Promise<void> {
       body: JSON.stringify(credentials),
     });
     if (!response.ok) {
-      throw new Error(`Admin sign-in failed with ${response.status}`);
+      throw new Error(`Sign-in failed with ${response.status}`);
     }
   }, adminCredentials);
 }
 
-test('private monitor never appears on public surfaces but shows in admin with a badge', async ({
+test('private monitor never appears to visitors but shows to the operator with a badge', async ({
   page,
   request,
 }) => {
@@ -496,10 +529,10 @@ test('private monitor never appears on public surfaces but shows in admin with a
   await expect(page.getByText(/out of 13/)).toHaveCount(0);
   await expect(page.getByText('Internal Billing')).toHaveCount(0);
 
-  const eventsHtml = await (await request.get('/events')).text();
-  expect(eventsHtml).not.toContain(privateId);
-  expect(eventsHtml).not.toContain(privateName);
-  expect(eventsHtml).not.toContain(privateMonitor.maintenance);
+  const historyHtml = await (await request.get('/history')).text();
+  expect(historyHtml).not.toContain(privateId);
+  expect(historyHtml).not.toContain(privateName);
+  expect(historyHtml).not.toContain(privateMonitor.maintenance);
 
   const data = await readOkJson(await request.get('/api/data'), isPublicData);
   const dataBody = JSON.stringify(data);
@@ -521,43 +554,109 @@ test('private monitor never appears on public surfaces but shows in admin with a
   expect(maintenancesBody).not.toContain(privateName);
   expect(maintenancesBody).not.toContain(privateMonitor.maintenance);
 
+  const privatePage = await request.get(`/monitors/${privateId}`);
+  expect(privatePage.status()).toBe(404);
+  expect(await privatePage.text()).not.toContain(privateName);
+
   const embedBody = await (await request.get(`/embed/${privateId}`)).text();
   expect(embedBody).not.toContain(privateName);
   expect(embedBody).toContain('not found');
 
-  await page.goto('/admin');
-  await signInAsAdmin(page);
-  await page.goto('/admin');
-  await expect(page.getByRole('heading', { name: privateName })).toBeVisible();
+  await page.goto('/');
+  await signIn(page);
+  const signedInResponse = await page.request.get('/');
+  expect(signedInResponse.headers()['cache-control']).toBe('private, no-store');
+  expect(await signedInResponse.text()).toContain(privateName);
+
+  const clientErrors = collectClientErrors(page);
+  await page.goto('/');
   await expect(
-    page.getByText(`${privateName} is private and never appears on the public page`),
-  ).toBeAttached();
+    page.getByRole('button', { name: /Account menu, signed in as e2e-admin/ }),
+  ).toHaveText('EA');
+  await expect(
+    page.getByRole('heading', { name: /Some systems are down \(4 out of 14\)/i }),
+  ).toBeVisible();
+  await expect(page.getByText('9 up / 1 late / 4 down')).toBeVisible();
+  await expect(page.getByRole('heading', { name: privateName })).toBeVisible();
+  await expect(page.getByText(`${privateName} is private: visitors never see it`)).toBeAttached();
   await expect(page.getByText(privateMonitor.maintenance)).toBeVisible();
 
-  // The admin list reads the authenticated, unfiltered state, so private cards
-  // carry their real status instead of an empty one.
+  // The operator reads the unfiltered state, so private cards carry their real
+  // status instead of an empty one.
   await expect(page.getByText('Synthetic private outage')).toBeVisible();
-  await expect(
-    page.getByRole('button', {
-      name: new RegExp(`${privateHeartbeat.name}, operational, last run ${UTC_STAMP}`),
-    }),
-  ).toBeVisible();
+  await page
+    .getByRole('link', {
+      name: new RegExp(`^${privateHeartbeat.name}, operational, last run ${UTC_STAMP}`),
+    })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/monitors/${privateHeartbeat.id}$`));
   await expect(
     page.getByRole('button', { name: `Copy ping URL for ${privateHeartbeat.name}` }),
   ).toBeVisible();
 
-  // The admin view is the only surface that carries the raw reported reason.
+  // Signed-in mode is the only surface that carries the raw reported reason.
+  await page.goto('/monitors/demo_nightly_compactor');
   await expect(
     page.getByText('restic check failed: pack 3f9a12 missing from repository'),
   ).toBeVisible();
   await expect(page.getByText('Reported', { exact: true })).toBeVisible();
+
+  await page.goto('/history');
+  await expect(page.getByText(privateMonitor.maintenance)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add maintenance window' })).toBeVisible();
+  expect(clientErrors).toEqual([]);
 });
 
-test('events route renders seeded incidents and maintenance', async ({ page }) => {
+test('visitor view shows the operator the page as visitors see it', async ({ page }) => {
   const clientErrors = collectClientErrors(page);
-  await page.goto('/events');
+  await page.goto('/');
+  await signIn(page);
+  await page.goto('/');
 
-  await expect(page.getByRole('heading', { name: 'Events', exact: true })).toBeVisible();
+  // The menu opens only once the page has hydrated, so retry the click.
+  const visitorView = page.getByRole('menuitemcheckbox', { name: 'Visitor view' });
+  await expect(async () => {
+    await page.getByRole('button', { name: /Account menu/ }).click();
+    await expect(visitorView).toBeVisible({ timeout: 1000 });
+  }).toPass({ timeout: 15_000 });
+  await visitorView.click();
+
+  await expect(page).toHaveURL(/view=visitor/);
+  await expect(page.getByText('Visitor view: this is the page as visitors see it.')).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: /Some systems are down \(3 out of 12\)/i }),
+  ).toBeVisible();
+  await expect(page.getByText(privateMonitor.name)).toHaveCount(0);
+  await expect(page.getByText(privateMonitor.maintenance)).toHaveCount(0);
+
+  await page.getByRole('link', { name: /^Nightly Backup, / }).click();
+  await expect(page).toHaveURL(/\/monitors\/demo_nightly_backup\?view=visitor/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Nightly Backup' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Copy ping URL/ })).toHaveCount(0);
+
+  await page.getByRole('banner').getByRole('link', { name: 'History' }).click();
+  await expect(page).toHaveURL(/\/history\?.*view=visitor/);
+  await expect(page.getByRole('heading', { name: 'History', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add maintenance window' })).toHaveCount(0);
+  await expect(page.getByText(privateMonitor.maintenance)).toHaveCount(0);
+
+  await page.getByRole('link', { name: 'Exit visitor view' }).click();
+  await expect(page).not.toHaveURL(/view=visitor/);
+  await expect(page.getByRole('button', { name: 'Add maintenance window' })).toBeVisible();
+  await expect(page.getByText(privateMonitor.maintenance)).toBeVisible();
+  expect(clientErrors).toEqual([]);
+});
+
+test('history route renders seeded incidents and maintenance', async ({ page }) => {
+  const clientErrors = collectClientErrors(page);
+  await page.goto('/history');
+
+  await expect(page.getByRole('heading', { name: 'History', exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole('navigation', { name: 'Main navigation' })
+      .getByRole('link', { name: 'History' }),
+  ).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText('Incidents and scheduled maintenance')).toBeVisible();
   await expect(page.getByText('Active & Upcoming Maintenance')).toBeVisible();
   await expect(page.getByText('E2E active maintenance')).toBeVisible();
@@ -571,7 +670,7 @@ test('events route renders seeded incidents and maintenance', async ({ page }) =
   expect(clientErrors).toEqual([]);
 });
 
-test('events route filters by type, monitor, and invalid month fallback', async ({ page }) => {
+test('history route filters by type, monitor, and invalid month fallback', async ({ page }) => {
   const seeded = await readOkJson(
     await page.request.get('/api/maintenances'),
     isSeededMaintenanceList,
@@ -580,26 +679,26 @@ test('events route filters by type, monitor, and invalid month fallback', async 
   if (!upcoming) throw new Error('seeded upcoming maintenance is missing');
   const upcomingMonth = upcoming.start.slice(0, 7);
 
-  await page.goto('/events?type=incident');
+  await page.goto('/history?type=incident');
   await expect(page).toHaveURL(/type=incident/);
   await expect(page.getByText('Synthetic E2E outage')).toBeVisible();
   await expect(page.getByText('E2E active maintenance')).not.toBeVisible();
 
-  await page.goto('/events?type=maintenance');
+  await page.goto('/history?type=maintenance');
   await expect(page).toHaveURL(/type=maintenance/);
   await expect(page.getByText('E2E active maintenance')).toBeVisible();
   await expect(page.getByText('Synthetic E2E outage')).not.toBeVisible();
 
-  await page.goto(`/events?type=maintenance&month=${upcomingMonth}`);
+  await page.goto(`/history?type=maintenance&month=${upcomingMonth}`);
   await expect(page.getByText('E2E upcoming maintenance')).toBeVisible();
 
-  await page.goto(`/events?monitor=demo_example&month=${upcomingMonth}`);
+  await page.goto(`/history?monitor=demo_example&month=${upcomingMonth}`);
   await expect(page).toHaveURL(/monitor=demo_example/);
   await expect(page.getByText('E2E upcoming maintenance')).toBeVisible();
   await expect(page.getByText('Synthetic E2E outage')).not.toBeVisible();
 
-  await page.goto('/events?month=not-a-month');
-  await expect(page.getByRole('heading', { name: 'Events', exact: true })).toBeVisible();
+  await page.goto('/history?month=not-a-month');
+  await expect(page.getByRole('heading', { name: 'History', exact: true })).toBeVisible();
   await expect(page.getByText('Incidents and scheduled maintenance')).toBeVisible();
   await expect(page).not.toHaveURL(/not-a-month/);
 });
@@ -627,72 +726,71 @@ test('embed route renders seeded monitor status and variants', async ({ page, re
   expect(clientErrors).toEqual([]);
 });
 
-test.describe.serial('admin maintenance lifecycle', () => {
+test.describe.serial('operator maintenance lifecycle', () => {
   test.skip(
     Boolean(process.env.PLAYWRIGHT_BASE_URL),
-    'mutating admin E2E tests require the local seeded Wrangler server',
+    'mutating E2E tests require the local seeded Wrangler server',
   );
 
-  test('signs in, writes maintenance records, and exposes changes publicly', async ({ page }) => {
+  test('signs in, manages maintenance on History, and signs out', async ({ page }) => {
+    const clientErrors = collectClientErrors(page);
     await page.goto('/admin');
-    await expect(page.getByRole('heading', { name: 'Admin sign-in' })).toBeVisible();
+    await expect(page).toHaveURL(/\/login$/);
+    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
 
-    await signInAsAdmin(page);
+    // Form controls work only after hydration, so retry the first submit.
+    await expect(async () => {
+      await page.getByLabel('Username').fill(adminCredentials.username);
+      await page.getByLabel('Password').fill('wrong-password');
+      await page.getByRole('button', { name: 'Sign in' }).click();
+      await expect(page.getByRole('alert')).toHaveText('Invalid credentials', { timeout: 1000 });
+    }).toPass({ timeout: 15_000 });
+    // The browser logs the rejected sign-in request; nothing else may fail.
+    expect(clientErrors.filter((error) => !error.includes('status of 401'))).toEqual([]);
+    clientErrors.length = 0;
 
-    await page.goto('/admin');
-    await expect(page.getByRole('heading', { name: 'Admin' })).toBeVisible();
-    await expect(page.getByText('Manage scheduled maintenance windows')).toBeVisible();
+    await page.getByLabel('Password').fill(adminCredentials.password);
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByRole('button', { name: /Account menu/ })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Sign in' })).toHaveCount(0);
 
-    const adminRequest = page.context().request;
-    const now = Date.now();
-    const createdResponse = await adminRequest.post('/api/admin/maintenances', {
-      headers: adminAuthHeaders,
-      data: {
-        title: 'E2E lifecycle maintenance',
-        body: 'Created through the authenticated admin E2E flow.',
-        monitors: ['demo_example'],
-        start: new Date(now + 2 * HOUR_MS).toISOString(),
-        end: new Date(now + 3 * HOUR_MS).toISOString(),
-        color: 'blue',
-      },
-    });
-    expect(createdResponse.status()).toBe(201);
-    const created: unknown = await createdResponse.json();
-    if (!isValidMaintenance(created))
-      throw new Error('created maintenance has an unexpected shape');
-
-    await page.reload();
+    await page.getByRole('banner').getByRole('link', { name: 'History' }).click();
+    await page.getByRole('button', { name: 'Add maintenance window' }).click();
+    const addDialog = page.getByRole('dialog', { name: 'Add maintenance window' });
+    await addDialog.getByLabel('Title').fill('E2E lifecycle maintenance');
+    await addDialog.getByLabel('Description').fill('Created through the operator E2E flow.');
+    await addDialog.getByRole('button', { name: 'Select start date' }).click();
+    const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+    await page.getByRole('button', { name: new RegExp(`${month} 15th`) }).click();
+    await addDialog.getByRole('button', { name: 'Example Domain' }).click();
+    const created = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/admin/maintenances') &&
+        response.request().method() === 'POST',
+    );
+    await addDialog.getByRole('button', { name: 'Save' }).click();
+    expect((await created).status()).toBe(201);
+    await expect(addDialog).not.toBeVisible();
     await expect(page.getByText('E2E lifecycle maintenance')).toBeVisible();
 
-    const updatedResponse = await adminRequest.put('/api/admin/maintenances', {
-      headers: adminAuthHeaders,
-      data: {
-        id: created.id,
-        updates: {
-          title: 'E2E lifecycle maintenance updated',
-          body: 'Updated through the authenticated admin E2E flow.',
-          monitors: ['demo_cloudflare_trace'],
-          start: created.start,
-          end: created.end,
-          color: 'yellow',
-        },
-      },
-    });
-    await expect(updatedResponse).toBeOK();
-
-    await page.reload();
+    await page.getByRole('button', { name: 'Edit E2E lifecycle maintenance' }).click();
+    const editDialog = page.getByRole('dialog', { name: 'Edit maintenance window' });
+    await expect(editDialog.getByLabel('Description')).toHaveValue(
+      'Created through the operator E2E flow.',
+    );
+    await editDialog.getByLabel('Title').fill('E2E lifecycle maintenance updated');
+    await editDialog.getByRole('button', { name: 'Save' }).click();
+    await expect(editDialog).not.toBeVisible();
     await expect(page.getByText('E2E lifecycle maintenance updated')).toBeVisible();
-    await expect(page.getByText('Cloudflare Trace').first()).toBeVisible();
 
-    const publicMaintenancesResponse = await adminRequest.get('/api/maintenances');
-    const publicMaintenances = await readOkJson(publicMaintenancesResponse, isMaintenanceList);
-    expect(
-      publicMaintenances.some(
-        (maintenance) =>
-          maintenance.id === created.id &&
-          maintenance.title === 'E2E lifecycle maintenance updated',
-      ),
-    ).toBe(true);
+    const publicMaintenances = await readOkJson(
+      await page.request.get('/api/maintenances'),
+      isMaintenanceList,
+    );
+    expect(publicMaintenances.map((maintenance) => maintenance.title)).toContain(
+      'E2E lifecycle maintenance updated',
+    );
 
     await page.getByRole('button', { name: 'Delete E2E lifecycle maintenance updated' }).click();
     const deleteDialog = page.getByRole('dialog', { name: 'Delete maintenance window' });
@@ -703,7 +801,14 @@ test.describe.serial('admin maintenance lifecycle', () => {
     );
     await deleteDialog.getByRole('button', { name: 'Delete' }).click();
     expect((await deleted).status()).toBe(204);
-
     await expect(page.getByText('E2E lifecycle maintenance updated')).not.toBeVisible();
+
+    await page.getByRole('button', { name: /Account menu/ }).click();
+    await page.getByRole('menuitem', { name: 'Sign out' }).click();
+    await expect(page.getByRole('button', { name: /Account menu/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Add maintenance window' })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
+    expect((await page.request.get('/')).headers()['cache-control']).not.toBe('private, no-store');
+    expect(clientErrors).toEqual([]);
   });
 });

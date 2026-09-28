@@ -6,7 +6,7 @@ It serves:
 
 - The public UI (dashboard, history, embed)
 - Public JSON/SVG APIs under `/api/*`
-- An optional admin UI for managing scheduled maintenances
+- An optional operator sign-in (`/login`). Signed in, the same pages show private monitors, and Events gets maintenance editing.
 
 ## Required binding
 
@@ -17,11 +17,10 @@ It serves:
 
 These are Worker secrets. Do not commit them.
 
-- `FLAREWATCH_STATUS_PAGE_BASIC_AUTH='<output of vp run auth:secret -- <username> "<password>">'`
-  - Protects the entire status page.
 - `FLAREWATCH_ADMIN_BASIC_AUTH='<output of vp run auth:secret -- <username> "<password>">'`
-  - Enables and protects `/admin` and `/api/admin/*` with an in-app login, session cookie, and logout button.
-  - In production, if unset: `/admin` returns `404` and `/api/admin/*` returns `403`. In dev, admin is allowed without creds.
+  - Enables sign-in at `/login` with a session cookie. Signed-in pages are sent with `Cache-Control: private, no-store`.
+  - Protects `/api/admin/*`. Scripts can call it with the same credentials in a Basic `Authorization` header.
+  - In production, if unset: `/login` says sign-in is not set up and `/api/admin/*` returns `403`. In dev, everyone is signed in.
 
 Generate these values from a username and password:
 
@@ -30,9 +29,9 @@ Generate these values from a username and password:
 vp run auth:secret -- <username> 'replace-with-strong-password'
 ```
 
-Run once per secret and copy the full JSON output into your Worker secret or GitHub Secret. Do not edit JSON fields manually.
+Copy the full JSON output into your Worker secret or GitHub Secret. Do not edit JSON fields manually.
 
-Browsers cache Basic Auth credentials for the session. This applies to `FLAREWATCH_STATUS_PAGE_BASIC_AUTH`. To log out, close the tab/window or use a private window.
+To keep the whole page private, set `visibility: 'private'` in `packages/config/src/public.ts`. Visitors then get only the sign-in page. A leftover `FLAREWATCH_STATUS_PAGE_BASIC_AUTH` secret, which this setting replaces, also keeps the page private-only.
 
 ## Local development
 
