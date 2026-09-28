@@ -2,8 +2,8 @@ import { STATUS_COLORS } from '@/lib/constants';
 
 const legendItems = [
   { label: 'Operational', color: STATUS_COLORS.up },
-  { label: 'Partial outage', color: STATUS_COLORS.partial },
-  { label: 'Major outage', color: STATUS_COLORS.down },
+  { label: 'Brief downtime', color: STATUS_COLORS.partial },
+  { label: 'Longer downtime', color: STATUS_COLORS.down },
 ] as const;
 
 export function CalendarLegend() {

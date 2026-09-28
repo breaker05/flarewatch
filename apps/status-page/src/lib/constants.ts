@@ -1,8 +1,6 @@
 export const UPTIME_THRESHOLDS = {
   EXCELLENT: 99.9,
   GOOD: 99,
-  DEGRADED: 95,
-  PARTIAL: 50,
 } as const;
 
 const SECOND_MS = 1000;
