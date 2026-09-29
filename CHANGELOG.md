@@ -2,6 +2,12 @@
 
 All notable changes to FlareWatch will be documented in this file.
 
+## 2.3.1 - 2026-09-29
+
+### Security
+
+- Fixed an authorization bug in the status page's admin API. Update your fork.
+
 ## 2.3.0 - 2026-09-28
 
 ### Added
