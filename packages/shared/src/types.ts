@@ -5,10 +5,6 @@ export type PageConfig = {
   favicon?: string;
   logo?: string;
   apiCorsOrigins?: string[];
-  poweredByUrl?: string;
-  theme?: string;
-  customCss?: string;
-  themeVars?: string;
   /** 'private' shows visitors only the sign-in page. Defaults to 'public'. */
   visibility?: 'public' | 'private';
 };
@@ -49,6 +45,22 @@ type PageConfigLink = {
   highlight?: boolean;
 };
 
+/**
+ * Repeats the window from its start and end, which must be at most 24 hours apart. Each run
+ * starts at the start's wall-clock time in `timeZone`.
+ */
+export type MaintenanceRepeat = {
+  every: 'day' | 'week' | 'month';
+  /** Weekly only: 0 is Sunday. Defaults to the start's weekday. */
+  weekdays?: number[];
+  /** Monthly only: 1 to 31. Defaults to the start's day; months without that day are skipped. */
+  dayOfMonth?: number;
+  /** No run starts after this. Without it the window repeats for good. */
+  until?: number | string;
+  /** An IANA time zone, like Europe/Berlin. Defaults to UTC. */
+  timeZone?: string;
+};
+
 export type MaintenanceConfig = {
   monitors?: string[];
   title?: string;
@@ -56,6 +68,7 @@ export type MaintenanceConfig = {
   start: number | string;
   end?: number | string;
   color?: string;
+  repeat?: MaintenanceRepeat;
 };
 
 export type Maintenance = MaintenanceConfig & {
@@ -88,14 +101,26 @@ export type PullMonitor = {
    */
   link?: string | false;
   hideLatencyChart?: boolean;
+  /** Shows the monitor as degraded while its latest response took longer than this many milliseconds. Never alerts. */
+  maxLatencyMs?: number;
   expectedCodes?: number[];
   timeout?: number;
   headers?: { [key: string]: string | number };
   body?: string;
   responseKeyword?: string;
   responseForbiddenKeyword?: string;
+  /** A path like `$.a.b[0].c` into the JSON body; the value there must equal `responseJsonValue`. */
+  responseJsonPath?: string;
+  responseJsonValue?: string | number | boolean | null;
+  /** Response headers that must be present with exactly these values. Names ignore case. */
+  responseHeaderEquals?: Record<string, string>;
   checkProxy?: string;
   checkProxyFallback?: boolean;
+  /**
+   * Another place to check from, in `checkProxy`'s formats. When the check fails, it runs once
+   * more from here, and this result is the one recorded.
+   */
+  confirmVia?: string;
   pingProtocol?: 'tcp' | 'icmp';
   sslCheckEnabled?: boolean;
   sslCheckDaysBeforeExpiry?: number;
@@ -107,6 +132,8 @@ export type PullMonitor = {
   private?: boolean;
   /** Monitor ids this one reaches its target through. While one of them is down, this one sends no alert of its own. */
   dependsOn?: string[];
+  /** Check runs between reminders while the monitor stays down after its down alert, at least 30. Off when absent. */
+  reminderEveryChecks?: number;
 };
 
 export type HeartbeatMonitor = {
@@ -117,6 +144,8 @@ export type HeartbeatMonitor = {
   graceSeconds: number;
   private?: boolean;
   dependsOn?: string[];
+  /** Check runs between reminders while the job stays down after its down alert, at least 30. Off when absent. */
+  reminderEveryChecks?: number;
   link?: string | false;
   tooltip?: string;
 };
@@ -199,6 +228,8 @@ type SingleWebhook = {
   payload?: JsonValue;
   /** Request timeout in ms (default: 5000) */
   timeout?: number;
+  /** IDs of the monitors whose alerts this webhook gets. Absent means every monitor; an empty list, none. */
+  monitors?: string[];
 };
 
 export type Webhook = SingleWebhook;
@@ -302,12 +333,21 @@ export interface CheckResultWithLocation {
   result: CheckResult;
 }
 
+/** What one check run can still spend. Every monitor in the run shares one. */
+export interface RunBudget {
+  /** Unix timestamp (ms) by which every check has ended. */
+  deadline: number;
+  /** Subrequests left for extra attempts: a fallback or a confirmation. Spent as each starts. */
+  subrequests: number;
+}
+
 export interface CheckContext {
   /**
    * Worker bindings a checker may need. Kept structural and narrow so shared
    * does not depend on the worker's Env type.
    */
   env: { FLAREWATCH_PROXY_TOKEN?: string };
+  budget: RunBudget;
 }
 
 export interface MonitorChecker {

@@ -1,8 +1,14 @@
-import { IconAlertTriangle, IconCalendar, IconClock } from '@tabler/icons-react';
+import { IconAlertTriangle, IconCalendar, IconClock, IconRepeat } from '@tabler/icons-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { Maintenance } from '@flarewatch/shared';
-import { formatTimeUntil, formatDateRange, getMaintenanceColors } from '@/lib/maintenance';
+import { nextMaintenanceOccurrence, type Maintenance } from '@flarewatch/shared';
+import {
+  describeRepeat,
+  formatTimeUntil,
+  formatDateRange,
+  getMaintenanceColors,
+  occurrenceDates,
+} from '@/lib/maintenance';
 
 interface MaintenanceCardProps {
   maintenance: Maintenance;
@@ -17,9 +23,10 @@ export function MaintenanceCard({
   nowMs,
   variant,
 }: MaintenanceCardProps) {
+  const occurrence = nextMaintenanceOccurrence(maintenance, nowMs);
+  if (!occurrence) return null;
   const colors = getMaintenanceColors(maintenance.color);
-  const start = new Date(maintenance.start);
-  const end = maintenance.end ? new Date(maintenance.end) : null;
+  const { start, end } = occurrenceDates(occurrence);
   const now = new Date(nowMs);
   const isActive = variant === 'active';
   const Icon = isActive ? IconAlertTriangle : IconCalendar;
@@ -51,19 +58,20 @@ export function MaintenanceCard({
         {maintenance.body && (
           <p className="mt-1.5 text-sm text-muted-foreground">{maintenance.body}</p>
         )}
-        <div
-          className={cn(
-            'mt-2 flex items-center text-xs text-muted-foreground',
-            isActive ? 'gap-2 flex-wrap' : 'gap-4',
-          )}
-        >
-          <span className="flex items-center gap-1">
-            <IconClock className="size-3.5" />
+        <div className="mt-2 flex flex-wrap items-start gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span className="flex items-start gap-1">
+            <IconClock aria-hidden="true" className="mt-px size-3.5 shrink-0" />
             {formatDateRange(start, end)}
           </span>
           {isActive && end && (
-            <span className="text-status-degraded font-medium">
+            <span className="font-medium text-status-degraded-text">
               {`Ends in ${formatTimeUntil(end, now)}`}
+            </span>
+          )}
+          {maintenance.repeat && (
+            <span className="flex items-start gap-1">
+              <IconRepeat aria-hidden="true" className="mt-px size-3.5 shrink-0" />
+              {describeRepeat(maintenance.repeat)}
             </span>
           )}
         </div>

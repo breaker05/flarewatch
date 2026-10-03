@@ -2,17 +2,20 @@ import * as z from 'zod/mini';
 import {
   NOTIFICATION_TEMPLATES,
   type AccessConfig,
+  type CheckResultWithLocation,
   type HeartbeatSignal,
   type HeartbeatState,
   type LatencySample,
   type Maintenance,
   type NotificationConfig,
   type PageConfig,
+  type PullMonitor,
   type RuntimeConfig,
   type HubView,
   type Webhook,
 } from './types';
-import { isJsonObject, isNonEmptyString, isSecureUrl } from './utils';
+import { isNormalizedMaintenance, knownZone, normalizeMaintenance } from './maintenance';
+import { isJsonObject, isNonEmptyString, isSecureUrl, jsonPathKeys } from './utils';
 
 const PULL_METHODS = [
   'GET',
@@ -30,6 +33,8 @@ const MAX_HEARTBEAT_PERIOD_SECONDS = 2_678_400;
 const MAX_HEARTBEAT_GRACE_SECONDS = 604_800;
 /** A check or delivery may not outlast the minute between check runs. */
 const MAX_TIMEOUT_MS = 60_000;
+/** About half an hour on the one-minute cron, so a long outage cannot flood a channel. */
+const MIN_REMINDER_CHECKS = 30;
 
 /** With a base, a path on that site passes too. */
 function isValidHttpUrl(value: string, base?: string): boolean {
@@ -50,12 +55,14 @@ function pageLink(field: string) {
 }
 
 function pageImage(field: string) {
-  const error = `${field} must be an http(s) URL, a path or a data:image URL`;
+  const error = `${field} must be an https URL, a path or a data:image/png, jpeg, gif, webp or x-icon URL`;
   return z
     .string({ error })
     .check(
       z.refine(
-        (value) => isValidHttpUrl(value, 'https://page.invalid') || /^data:image\//i.test(value),
+        (value) =>
+          URL.parse(value, 'https://page.invalid')?.protocol === 'https:' ||
+          /^data:image\/(?:png|jpeg|gif|webp|x-icon)[;,]/i.test(value),
         { error },
       ),
     );
@@ -115,31 +122,24 @@ type SchemaOutput<T, Depth extends number = 4> = Depth extends 0
   ? unknown
   : { [K in keyof T]: SchemaOutput<T[K], Prev[Depth]> | undefined };
 
-const toTime = (value: string | number) => new Date(value).getTime();
+/** The record to store: its id and times plus the window as normalizeMaintenance returns it. */
+export function toStoredMaintenance(value: unknown, { capped = true } = {}): Maintenance | null {
+  if (!isJsonObject(value) || !isNonEmptyString(value.id)) return null;
+  const { createdAt, updatedAt } = value;
+  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) return null;
+  if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) return null;
+  const result = normalizeMaintenance(value, { capped });
+  if ('error' in result) return null;
+  return { ...result.value, id: value.id, createdAt, updatedAt };
+}
 
-const timestamp = z
-  .union([z.string(), z.number()])
-  .check(z.refine((value) => !Number.isNaN(toTime(value)), { error: 'must be a date' }));
-
-const maintenanceSchema: z.ZodMiniType<SchemaOutput<Maintenance>> = z
-  .object({
-    id: z.string().check(z.minLength(1)),
-    body: z.string().check(z.minLength(1)),
-    createdAt: z.number(),
-    updatedAt: z.number(),
-    start: timestamp,
-    end: z.optional(timestamp),
-    title: z.optional(z.string()),
-    color: z.optional(z.string()),
-    monitors: z.optional(z.array(z.string())),
-  })
-  .check(
-    z.refine(
-      (maintenance) =>
-        maintenance.end === undefined || toTime(maintenance.end) >= toTime(maintenance.start),
-      { error: 'end must not be before start' },
-    ),
-  );
+/**
+ * A stored window, already normalized: one that is not would reach the schedule maths raw. Size
+ * caps are not checked, so a window stored before them still loads.
+ */
+export function isValidMaintenance(value: unknown): value is Maintenance {
+  return toStoredMaintenance(value, { capped: false }) !== null && isNormalizedMaintenance(value);
+}
 
 function nonEmptyString(field: string) {
   const error = `${field} must be a non-empty string`;
@@ -151,11 +151,16 @@ function intInRange(field: string, min: number, max: number) {
   return z.int({ error }).check(z.gte(min, { error }), z.lte(max, { error }));
 }
 
+const reminderError = `reminderEveryChecks must be an integer of at least ${MIN_REMINDER_CHECKS}`;
+
 const monitorCommon = {
   id: nonEmptyString('id'),
   name: nonEmptyString('name'),
   private: z.optional(z.boolean({ error: 'private must be a boolean' })),
   dependsOn: z.optional(z.array(z.string(), { error: 'dependsOn must be a list of monitor ids' })),
+  reminderEveryChecks: z.optional(
+    z.int({ error: reminderError }).check(z.gte(MIN_REMINDER_CHECKS, { error: reminderError })),
+  ),
   link: z.optional(
     z.union([z.literal(false), pageLink('link')], {
       error: 'link must be false or an http(s) URL or a path',
@@ -163,29 +168,137 @@ const monitorCommon = {
   ),
 };
 
-const pullMonitorSchema = z
-  .looseObject({
-    ...monitorCommon,
-    method: z.enum(PULL_METHODS),
-    target: z.string({ error: 'target must be a string' }),
-    timeout: z.optional(intInRange('timeout', 1, MAX_TIMEOUT_MS)),
-  })
-  .check((ctx) => {
-    const issue = targetIssue(ctx.value.method, ctx.value.target);
-    if (issue) ctx.issues.push({ code: 'custom', message: issue, input: ctx.value });
-  });
+function timeZone(field: string) {
+  const error = `${field} must be an IANA time zone name such as Europe/Helsinki`;
+  return z.string({ error }).check(z.refine((value) => knownZone(value) !== undefined, { error }));
+}
 
-const heartbeatMonitorSchema = z.looseObject({
+function optionalString(field: string) {
+  return z.optional(z.string({ error: `${field} must be a string` }));
+}
+
+function optionalBoolean(field: string) {
+  return z.optional(z.boolean({ error: `${field} must be a boolean` }));
+}
+
+/** Where a check runs. The message never quotes the value: a Globalping URL holds a token. */
+function checkLocation(field: string) {
+  const error = `${field} must be an http(s) URL or globalping://<token>`;
+  return z
+    .string({ error })
+    .check(
+      z.refine(
+        (value) =>
+          value.startsWith('globalping://')
+            ? Boolean(URL.parse(value)?.hostname)
+            : isValidHttpUrl(value),
+        { error },
+      ),
+    );
+}
+
+/** RFC 9110 token characters; Headers.get throws on anything else. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+const pullMonitorShape = {
   ...monitorCommon,
-  id: z
-    .string()
-    .check(z.regex(HEARTBEAT_ID, { error: 'HEARTBEAT id must match ^[A-Za-z0-9_-]{1,64}$' })),
-  method: z.literal('HEARTBEAT'),
-  periodSeconds: intInRange('periodSeconds', 60, MAX_HEARTBEAT_PERIOD_SECONDS),
-  graceSeconds: intInRange('graceSeconds', 0, MAX_HEARTBEAT_GRACE_SECONDS),
-  target: z.optional(z.never({ error: 'HEARTBEAT must not define target' })),
-  checkProxy: z.optional(z.never({ error: 'HEARTBEAT must not define checkProxy' })),
+  method: z.enum(PULL_METHODS),
+  target: z.string({ error: 'target must be a string' }),
+  tooltip: optionalString('tooltip'),
+  hideLatencyChart: optionalBoolean('hideLatencyChart'),
+  expectedCodes: z.optional(
+    z.array(intInRange('expectedCodes', 100, 599), {
+      error: 'expectedCodes must be a list of status codes',
+    }),
+  ),
+  timeout: z.optional(intInRange('timeout', 1, MAX_TIMEOUT_MS)),
+  maxLatencyMs: z.optional(
+    z
+      .int({ error: 'maxLatencyMs must be a positive integer' })
+      .check(z.gte(1, { error: 'maxLatencyMs must be a positive integer' })),
+  ),
+  headers: z.optional(
+    z.record(z.string(), z.union([z.string(), z.number()]), {
+      error: 'headers must map names to strings or numbers',
+    }),
+  ),
+  body: optionalString('body'),
+  responseKeyword: optionalString('responseKeyword'),
+  responseForbiddenKeyword: optionalString('responseForbiddenKeyword'),
+  responseJsonPath: z.optional(
+    z.string({ error: 'responseJsonPath must be a string' }).check(
+      z.refine((path) => jsonPathKeys(path) !== null, {
+        error: 'responseJsonPath must be a path like $.a.b[0].c',
+      }),
+    ),
+  ),
+  responseJsonValue: z.optional(
+    z.union([z.string(), z.number(), z.boolean(), z.null()], {
+      error: 'responseJsonValue must be a string, number, boolean or null',
+    }),
+  ),
+  responseHeaderEquals: z.optional(
+    z
+      .record(z.string(), z.string({ error: 'responseHeaderEquals values must be strings' }), {
+        error: 'responseHeaderEquals must map header names to strings',
+      })
+      .check(
+        z.refine((headers) => Object.keys(headers).every((name) => HEADER_NAME.test(name)), {
+          error: 'responseHeaderEquals: bad header name',
+        }),
+      ),
+  ),
+  checkProxy: z.optional(checkLocation('checkProxy')),
+  checkProxyFallback: optionalBoolean('checkProxyFallback'),
+  confirmVia: z.optional(checkLocation('confirmVia')),
+  pingProtocol: z.optional(
+    z.enum(['tcp', 'icmp'], { error: "pingProtocol must be 'tcp' or 'icmp'" }),
+  ),
+  sslCheckEnabled: optionalBoolean('sslCheckEnabled'),
+  sslCheckDaysBeforeExpiry: z.optional(intInRange('sslCheckDaysBeforeExpiry', 0, 3650)),
+  sslIgnoreSelfSigned: optionalBoolean('sslIgnoreSelfSigned'),
+} satisfies Record<keyof PullMonitor, z.ZodMiniType>;
+
+/** For a strict object, so a misspelt field fails the config instead of being ignored. */
+const unknownFieldError = {
+  error: (issue: z.core.$ZodRawIssue) =>
+    issue.code === 'unrecognized_keys'
+      ? `unknown field ${issue.keys.map((key) => JSON.stringify(key)).join(', ')}`
+      : undefined,
+};
+
+const pullMonitorSchema = z.strictObject(pullMonitorShape, unknownFieldError).check((ctx) => {
+  const { method, target, responseJsonPath, responseJsonValue, checkProxy, confirmVia } = ctx.value;
+  const issues = [
+    targetIssue(method, target),
+    (responseJsonPath === undefined) !== (responseJsonValue === undefined)
+      ? 'responseJsonPath and responseJsonValue go together'
+      : null,
+    confirmVia !== undefined && confirmVia === checkProxy
+      ? 'confirmVia must be another place than checkProxy'
+      : null,
+  ];
+  for (const message of issues) {
+    if (message) ctx.issues.push({ code: 'custom', message, input: ctx.value });
+  }
 });
+
+const heartbeatMonitorSchema = z.strictObject(
+  {
+    ...monitorCommon,
+    id: z
+      .string()
+      .check(z.regex(HEARTBEAT_ID, { error: 'HEARTBEAT id must match ^[A-Za-z0-9_-]{1,64}$' })),
+    method: z.literal('HEARTBEAT'),
+    periodSeconds: intInRange('periodSeconds', 60, MAX_HEARTBEAT_PERIOD_SECONDS),
+    graceSeconds: intInRange('graceSeconds', 0, MAX_HEARTBEAT_GRACE_SECONDS),
+    target: z.optional(z.never({ error: 'HEARTBEAT must not define target' })),
+    checkProxy: z.optional(z.never({ error: 'HEARTBEAT must not define checkProxy' })),
+    maxLatencyMs: z.optional(z.never({ error: 'HEARTBEAT must not define maxLatencyMs' })),
+    tooltip: optionalString('tooltip'),
+  },
+  unknownFieldError,
+);
 
 function methodIssue(method: unknown): string {
   const upper = typeof method === 'string' ? method.toUpperCase() : undefined;
@@ -262,22 +375,26 @@ function loopFrom(start: string, byId: Map<string, DependencyNode>): string[] | 
   return walk(start, [start]);
 }
 
-const statusPageSchema: z.ZodMiniType<SchemaOutput<PageConfig>> = z.object({
-  title: z.optional(z.string()),
-  visibility: z.optional(z.enum(['public', 'private'])),
-  links: z.optional(
-    z.array(
-      z.object({
-        link: pageLink('links[].link'),
-        label: z.string(),
-        highlight: z.optional(z.boolean()),
-      }),
+const statusPageSchema: z.ZodMiniType<SchemaOutput<PageConfig>> = z.strictObject(
+  {
+    title: z.optional(z.string()),
+    visibility: z.optional(z.enum(['public', 'private'])),
+    links: z.optional(
+      z.array(
+        z.object({
+          link: pageLink('links[].link'),
+          label: z.string(),
+          highlight: z.optional(z.boolean()),
+        }),
+      ),
     ),
-  ),
-  favicon: z.optional(pageImage('favicon')),
-  logo: z.optional(pageImage('logo')),
-  poweredByUrl: z.optional(pageLink('poweredByUrl')),
-});
+    favicon: z.optional(pageImage('favicon')),
+    logo: z.optional(pageImage('logo')),
+    group: z.optional(z.record(z.string(), z.array(z.string()))),
+    apiCorsOrigins: z.optional(z.array(z.string())),
+  },
+  unknownFieldError,
+);
 
 const webhookMethod = z.pipe(
   z.string().check(z.toUpperCase()),
@@ -286,32 +403,54 @@ const webhookMethod = z.pipe(
 
 const webhookTimeout = intInRange('timeout', 1, MAX_TIMEOUT_MS);
 
+const webhookShape = {
+  url: z.string().check(z.refine(isValidHttpUrl)),
+  template: z.optional(z.enum(NOTIFICATION_TEMPLATES)),
+  options: z.optional(z.record(z.string(), z.string())),
+  method: z.optional(webhookMethod),
+  headers: z.optional(z.record(z.string(), z.union([z.string(), z.number()]))),
+  payloadType: z.optional(z.enum(['param', 'json', 'x-www-form-urlencoded'])),
+  payload: z.optional(z.json()),
+  timeout: z.optional(webhookTimeout),
+  monitors: z.optional(z.array(z.string(), { error: 'monitors must be a list of monitor ids' })),
+};
+
+// Strict: a misspelt `monitors` would otherwise vanish and route every monitor to the webhook.
 const webhookSchema: z.ZodMiniType<SchemaOutput<Webhook>> = z
-  .object({
-    url: z.string().check(z.refine(isValidHttpUrl)),
-    template: z.optional(z.enum(NOTIFICATION_TEMPLATES)),
-    options: z.optional(z.record(z.string(), z.string())),
-    method: z.optional(webhookMethod),
-    headers: z.optional(z.record(z.string(), z.union([z.string(), z.number()]))),
-    payloadType: z.optional(z.enum(['param', 'json', 'x-www-form-urlencoded'])),
-    payload: z.optional(z.json()),
-    timeout: z.optional(webhookTimeout),
-  })
+  .strictObject(webhookShape)
   .check(z.refine((webhook) => isAllowedPayload(webhook.payloadType, webhook.payload)));
 
 const notificationSchema: z.ZodMiniType<SchemaOutput<NotificationConfig>> = z.object({
   webhook: z.optional(z.union([webhookSchema, z.array(webhookSchema)])),
-  timeZone: z.optional(z.string()),
+  timeZone: z.optional(timeZone('timeZone')),
   gracePeriod: z.optional(z.number()),
   skipNotificationIds: z.optional(z.array(z.string())),
   skipErrorChangeNotification: z.optional(z.boolean()),
 });
 
-const runtimeConfigSchema: z.ZodMiniType<SchemaOutput<RuntimeConfig>> = z.object({
-  monitors: monitorListSchema,
-  statusPage: z.optional(statusPageSchema),
-  notification: z.optional(notificationSchema),
-});
+const runtimeConfigSchema: z.ZodMiniType<SchemaOutput<RuntimeConfig>> = z
+  .object({
+    monitors: monitorListSchema,
+    statusPage: z.optional(statusPageSchema),
+    notification: z.optional(notificationSchema),
+  })
+  .check((ctx) => {
+    const ids = ctx.value.monitors.map(({ id }) => id);
+    const webhook = ctx.value.notification?.webhook;
+    const listed = Array.isArray(webhook);
+    (listed ? webhook : [webhook]).forEach((entry, index) => {
+      for (const id of entry?.monitors ?? []) {
+        // SchemaOutput stops typing this deep; the webhook schema has checked each id is a string.
+        if (typeof id !== 'string' || ids.includes(id)) continue;
+        ctx.issues.push({
+          code: 'custom',
+          message: `no monitor has id "${id}"`,
+          input: entry,
+          path: ['notification', 'webhook', ...(listed ? [index] : []), 'monitors'],
+        });
+      }
+    });
+  });
 
 const PROVIDER_ID = /^[A-Za-z0-9_-]{1,32}$/;
 const ACCESS_RULE = /^(\*@[^@\s]+|[^@\s*]+@[^@\s]+|group:\S+|github:[A-Za-z0-9-]+)$/;
@@ -401,7 +540,7 @@ const latencySampleSchema = z.object({ loc: z.string(), ping: z.number(), time: 
 
 const hubViewSchema: z.ZodMiniType<SchemaOutput<HubView>> = z.object({
   lastUpdate: z.number(),
-  maintenances: z.array(maintenanceSchema),
+  maintenances: z.array(z.custom<Maintenance>(isValidMaintenance)),
   monitors: z.record(
     z.string(),
     z.object({
@@ -413,8 +552,6 @@ const hubViewSchema: z.ZodMiniType<SchemaOutput<HubView>> = z.object({
     }),
   ),
 });
-
-export const isValidMaintenance = asTypeGuard<Maintenance>(maintenanceSchema);
 
 export function configIssues(value: unknown): string[] {
   const result = runtimeConfigSchema.safeParse(value);
@@ -434,8 +571,9 @@ export function configIssues(value: unknown): string[] {
 /**
  * The webhooks in the FLAREWATCH_WEBHOOKS secret, one or a list as in `notification.webhook`.
  * A bad entry is dropped with an issue; the others still alert. Issues never quote the secret.
+ * `monitorIds` are the configured monitors, which an entry's `monitors` may list.
  */
-export function parseSecretWebhooks(text: string) {
+export function parseSecretWebhooks(text: string, monitorIds: string[]) {
   const webhooks: Webhook[] = [];
   const issues: string[] = [];
   let value: unknown;
@@ -456,6 +594,26 @@ export function parseSecretWebhooks(text: string) {
       );
       entry = { ...entry, timeout: undefined };
     }
+    // An unknown field or monitor id is ignored, not fatal, for the same reason. Issues count
+    // them without naming them, since any part of the secret could carry a token.
+    if (isJsonObject(entry)) {
+      const known = Object.entries(entry).filter(([key]) => Object.hasOwn(webhookShape, key));
+      const unknown = Object.keys(entry).length - known.length;
+      if (unknown > 0)
+        issues.push(`webhook ${index + 1}: ${countOf(unknown, 'unknown field')} ignored`);
+      entry = Object.fromEntries(known);
+    }
+    if (isJsonObject(entry) && Array.isArray(entry.monitors)) {
+      const listed: unknown[] = entry.monitors;
+      const monitors = listed.filter((id) => typeof id !== 'string' || monitorIds.includes(id));
+      const unknown = listed.length - monitors.length;
+      if (unknown > 0) {
+        issues.push(
+          `webhook ${index + 1}.monitors: ${countOf(unknown, 'unknown monitor id')} ignored`,
+        );
+      }
+      entry = { ...entry, monitors };
+    }
     const result = webhookSchema.safeParse(entry);
     // The parsed value, not the entry: parsing upper-cases the method.
     if (result.success && isWebhook(result.data)) webhooks.push(result.data);
@@ -467,6 +625,10 @@ export function parseSecretWebhooks(text: string) {
     }
   });
   return { webhooks, issues };
+}
+
+function countOf(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
 
 export function accessConfigIssues(value: unknown, pageGroups: string[]): string[] {
@@ -500,6 +662,29 @@ export const isHubView = asTypeGuard<HubView>(hubViewSchema);
 const isAccessConfig = asTypeGuard<AccessConfig>(accessConfigSchema);
 const isWebhook = asTypeGuard<Webhook>(webhookSchema);
 export const isLatencySamples = asTypeGuard<LatencySample[]>(z.array(latencySampleSchema));
+
+const checkResultWithLocationSchema: z.ZodMiniType<SchemaOutput<CheckResultWithLocation>> =
+  z.object({
+    location: z.string(),
+    result: z.discriminatedUnion('ok', [
+      z.object({
+        ok: z.literal(true),
+        latency: z.number(),
+        ssl: z.exactOptional(
+          z.object({
+            expiryDate: z.number(),
+            daysUntilExpiry: z.number(),
+            issuer: z.exactOptional(z.string()),
+            subject: z.exactOptional(z.string()),
+          }),
+        ),
+      }),
+      z.object({ ok: z.literal(false), error: z.string(), latency: z.exactOptional(z.number()) }),
+    ]),
+  });
+export const isCheckResultWithLocation = asTypeGuard<CheckResultWithLocation>(
+  checkResultWithLocationSchema,
+);
 
 export function parseMaintenances(value: unknown): Maintenance[] {
   return Array.isArray(value) ? value.filter(isValidMaintenance) : [];

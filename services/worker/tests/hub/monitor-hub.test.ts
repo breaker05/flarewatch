@@ -1,7 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vite-plus/test';
 import type { CheckResult, HeartbeatMonitor, MonitorTarget } from '@flarewatch/shared';
-import type { AlertPolicy, CheckRecord } from '../../src/hub/monitor-hub';
+import type { AlertPolicy } from '../../src/hub/alerts';
+import type { CheckRecord } from '../../src/hub/monitor-hub';
 import { createHub } from '../helpers/hub';
 
 const T0 = Date.parse('2025-01-15T12:00:00Z') / 1000;
@@ -101,21 +102,6 @@ describe('MonitorHub incidents', () => {
       status: 'up',
       incidents: [{ start: [T0], error: ['Unavailable'], end: lastUp }],
     });
-  });
-
-  it('sends a flapping monitor’s recovery alert once it has stayed up', () => {
-    const { hub } = createHub();
-    const run = (now: number, result: CheckResult) => {
-      const { alerts } = hub.record(now, [check('api', result)], POLICY);
-      hub.confirmAlerts(alerts.map(({ incident }) => ({ incident, delivered: true })));
-      return alerts.map(({ kind, at }) => (at === undefined ? kind : `${kind} at ${at}`));
-    };
-
-    expect(run(T0, down())).toEqual(['down']);
-    expect(run(T0 + 60, up())).toEqual(['up']);
-    expect(run(T0 + 120, down())).toEqual(['down']);
-    expect(run(T0 + 180, up())).toEqual([]);
-    expect(run(T0 + 180 + 15 * 60, up())).toEqual([`up at ${T0 + 180}`]);
   });
 
   it('alerts a flapping monitor only once it stays down for the grace period', () => {
@@ -519,6 +505,21 @@ describe('MonitorHub maintenance windows', () => {
     expect(hub.view().maintenances.map(({ id }) => id)).toEqual(['b-early']);
   });
 
+  it('refuses a new window past 100 and still updates an existing one', () => {
+    const { hub } = createHub();
+    for (let index = 1; index <= 100; index++) {
+      expect(hub.putMaintenance(window(`w${index}`, T0))).toBe(true);
+    }
+
+    expect(hub.putMaintenance(window('w101', T0))).toBe(false);
+    expect(hub.putMaintenance({ ...window('w50', T0), body: 'edited' })).toBe(true);
+
+    const stored = hub.view().maintenances;
+    expect(stored).toHaveLength(100);
+    expect(stored.find(({ id }) => id === 'w50')?.body).toBe('edited');
+    expect(stored.some(({ id }) => id === 'w101')).toBe(false);
+  });
+
   it('deletes a window 90 days after it ends and keeps one without an end', () => {
     const { hub } = createHub();
     hub.putMaintenance(window('expired', T0 - 100 * DAY, T0 - 90 * DAY - 1));
@@ -532,6 +533,53 @@ describe('MonitorHub maintenance windows', () => {
     hub.record(T0, [check('api', up())]);
 
     expect(hub.view().maintenances.map(({ id }) => id)).toEqual(['open', 'recent']);
+  });
+
+  it('deletes a repeating window 90 days after its until and never one without', () => {
+    const { hub } = createHub();
+    const daily = (id: string, start: number, until?: number) => ({
+      ...window(id, start, start + 3600),
+      repeat: {
+        every: 'day' as const,
+        ...(until !== undefined && { until: new Date(until * 1000).toISOString() }),
+      },
+    });
+    hub.putMaintenance(daily('ended', T0 - 180 * DAY, T0 - 91 * DAY));
+    hub.putMaintenance(daily('recent', T0 - 150 * DAY, T0 - 90 * DAY));
+    hub.putMaintenance(daily('forever', T0 - 200 * DAY));
+
+    hub.record(T0, [check('api', up())]);
+
+    expect(hub.view().maintenances.map(({ id }) => id)).toEqual(['forever', 'recent']);
+  });
+
+  it('neither throws on nor uses a stored row with a zone that is not normalized', () => {
+    const { hub } = createHub();
+    const nightly = (id: string, timeZone: string) => ({
+      ...window(id, T0 - 10 * DAY - 60, T0 - 10 * DAY + 60, ['db']),
+      repeat: { every: 'day' as const, timeZone },
+    });
+    hub.putMaintenance(nightly('padded', ' Europe/Berlin '));
+    hub.putMaintenance(nightly('unknown', 'Mars/Olympus'));
+
+    const run = hub.record(T0, [check('db', down())], POLICY);
+
+    expect(run.alerts.map(({ monitorId }) => monitorId)).toEqual(['db']);
+    expect(hub.view().maintenances).toEqual([]);
+  });
+
+  it("holds back alerts during a repeating window's run, not between runs", () => {
+    const { hub } = createHub();
+    hub.putMaintenance({
+      ...window('nightly', T0 - 10 * DAY - 60, T0 - 10 * DAY + 60, ['db']),
+      repeat: { every: 'day' },
+    });
+
+    const inside = hub.record(T0, [check('db', down())], POLICY);
+    const afterRun = hub.record(T0 + 60, [check('db', down('Other'))], POLICY);
+
+    expect(inside.alerts).toEqual([]);
+    expect(afterRun.alerts.map(({ monitorId }) => monitorId)).toEqual(['db']);
   });
 
   it('holds back alerts inside a window that covers the monitor, up to its end', () => {
@@ -577,10 +625,49 @@ describe('MonitorHub after an upgrade from a release without alert tracking', ()
   });
 });
 
+describe('MonitorHub after an upgrade from 3.2', () => {
+  it('reminds about an outage alerted before the upgrade once 30 runs have passed since it', () => {
+    const db = new DatabaseSync(':memory:');
+    const before = createHub({}, db).hub;
+    const { alerts } = before.record(T0, [check('api', down())], POLICY);
+    before.confirmAlerts(
+      alerts.map(({ incident, kind, reopenedAt, run }) => ({
+        incident,
+        kind,
+        reopenedAt,
+        run,
+        delivered: true,
+      })),
+    );
+    // The schema 3.2.0 left behind.
+    db.exec(`
+      DELETE FROM _migrations WHERE id >= 8;
+      ALTER TABLE meta DROP COLUMN runs;
+      ALTER TABLE incidents DROP COLUMN alert_run;
+      ALTER TABLE incidents DROP COLUMN reminders;
+    `);
+    const { hub } = createHub({}, db);
+    const api: CheckRecord = {
+      monitor: { ...monitor('api'), reminderEveryChecks: 30 },
+      check: { location: 'HEL', result: down() },
+    };
+
+    const kinds = Array.from({ length: 30 }, (_, i) =>
+      hub.record(T0 + (i + 1) * 60, [api], POLICY).alerts.map(({ kind }) => kind),
+    );
+
+    expect(kinds.flat()).toEqual(['reminder']);
+    expect(kinds[29]).toEqual(['reminder']);
+  });
+});
+
 /** Rewinds a new hub's storage to the schema 3.1.0 left behind. */
 function rewindTo31(db: DatabaseSync): void {
   db.exec(`
     DELETE FROM _migrations WHERE id >= 7;
+    ALTER TABLE meta DROP COLUMN runs;
+    ALTER TABLE incidents DROP COLUMN alert_run;
+    ALTER TABLE incidents DROP COLUMN reminders;
     DROP TABLE incident_lists;
     DROP TABLE latency;
     ALTER TABLE incidents DROP COLUMN up_since;

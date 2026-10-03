@@ -208,6 +208,7 @@ test('a row opens the monitor page with its history and chart', async ({ page })
   await expect(page.getByRole('heading', { name: 'Last 90 days' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Response times (ms)' })).toBeVisible();
   await expect(page.getByTestId('latency-chart')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Check now' })).toHaveCount(0);
 
   await expect(page.getByText('No incidents or maintenance in the last 90 days.')).toBeVisible();
   await page.getByRole('link', { name: 'Full history' }).click();
@@ -671,6 +672,20 @@ test('private monitor never appears to visitors but shows to the operator with a
   await expect(
     page.getByRole('button', { name: `Copy ping URL for ${privateHeartbeat.name}` }),
   ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Check now' })).toHaveCount(0);
+
+  // Check now shows one check's result and saves nothing: the card keeps the stored outage.
+  await page.goto(`/monitors/${privateId}`);
+  const checkResult = page.getByRole('status', { name: 'Check now result' });
+  // The button works only once the page has hydrated, so retry the click.
+  await expect(async () => {
+    await page.getByRole('button', { name: 'Check now' }).click();
+    await expect(checkResult).toHaveText(/^(Up|Down)/, { timeout: 15_000 });
+  }).toPass({ timeout: 45_000 });
+  await page.reload();
+  // The first match is the card's current error; History lists the incident below it.
+  await expect(page.getByText('Synthetic private outage').first()).toHaveClass(/status-down/);
+  await expect(checkResult).toBeEmpty();
 
   // Signed-in mode is the only surface that carries the raw reported reason.
   await page.goto('/monitors/demo_nightly_compactor');
@@ -824,6 +839,28 @@ test('another site can frame the embed but not the status page', async ({ page, 
   await expect(page.frameLocator('#page').getByRole('banner')).toHaveCount(0);
 });
 
+test('every script on a page carries the nonce from its Content-Security-Policy', async ({
+  request,
+}) => {
+  for (const path of ['/', '/embed/demo_example']) {
+    const response = await request.get(path);
+    const policy = response.headers()['content-security-policy'] ?? '';
+    const nonce = /script-src 'self' 'nonce-([^']+)';/.exec(policy)?.[1];
+    expect(nonce, path).toBeTruthy();
+
+    const scripts = [
+      ...(await response.text()).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g),
+    ].map(([, attrs = '', body = '']) => ({
+      nonce: /\bnonce=["']([^"']*)["']/.exec(attrs)?.[1],
+      body,
+    }));
+    expect(scripts.map((script) => script.nonce)).toEqual(scripts.map(() => nonce));
+    const themeInit = scripts.filter(({ body }) => body.includes('__flarewatchSetThemePreference'));
+    expect(themeInit, path).toHaveLength(1);
+    expect(scripts.length, path).toBeGreaterThan(themeInit.length);
+  }
+});
+
 test.describe.serial('operator maintenance lifecycle', () => {
   test.skip(
     Boolean(process.env.PLAYWRIGHT_BASE_URL),
@@ -908,6 +945,57 @@ test.describe.serial('operator maintenance lifecycle', () => {
     expect((await page.request.get('/')).headers()['cache-control']).not.toBe('private, no-store');
     expect(clientErrors).toEqual([]);
   });
+
+  test('repeats a maintenance window weekly from History', async ({ page }) => {
+    const clientErrors = collectClientErrors(page);
+    await page.goto('/login');
+    await page.getByRole('link', { name: 'Continue with Test ID' }).click();
+    await page.getByRole('link', { name: 'operator@e2e.test' }).click();
+    await page.getByRole('link', { name: 'History' }).click();
+
+    await page.getByRole('button', { name: 'Add maintenance window' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add maintenance window' });
+    await dialog.getByLabel('Title').fill('E2E weekly maintenance');
+    await dialog.getByLabel('Description').fill('Repeats on Mondays and Wednesdays.');
+    const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+    await dialog.getByRole('button', { name: 'Select start date' }).click();
+    await page.getByRole('button', { name: new RegExp(`${month} 15th`) }).click();
+    await dialog.getByRole('combobox', { name: 'Repeat' }).click();
+    await page.getByRole('option', { name: 'Every week' }).click();
+
+    await expect(dialog.getByText('A repeating window needs an end')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    await dialog.getByRole('button', { name: 'Select end date' }).click();
+    await page.getByRole('button', { name: new RegExp(`${month} 16th`) }).click();
+    await dialog.getByRole('button', { name: 'Monday' }).click();
+    await dialog.getByRole('button', { name: 'Wednesday' }).click();
+    const created = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/admin/maintenances') &&
+        response.request().method() === 'POST',
+    );
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    expect(await response.json()).toMatchObject({ repeat: { every: 'week', weekdays: [1, 3] } });
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByText('Every week on Mon, Wed').first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Delete E2E weekly maintenance' }).first().click();
+    const deleted = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/admin/maintenances') &&
+        response.request().method() === 'DELETE',
+    );
+    await page
+      .getByRole('dialog', { name: 'Delete maintenance window' })
+      .getByRole('button', { name: 'Delete' })
+      .click();
+    expect((await deleted).status()).toBe(204);
+    await expect(page.getByText('E2E weekly maintenance')).toHaveCount(0);
+    expect(clientErrors).toEqual([]);
+  });
 });
 
 test.describe('provider sign-in', () => {
@@ -930,6 +1018,11 @@ test.describe('provider sign-in', () => {
     await page.getByRole('link', { name: 'History' }).click();
     await expect(page.getByRole('heading', { name: 'History' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Add maintenance window' })).toHaveCount(0);
+    await page.goto('/monitors/demo_private_internal');
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Internal Billing API' }),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Check now' })).toHaveCount(0);
   });
 
   test('an audience member sees their page group and no other private monitor', async ({

@@ -1,29 +1,30 @@
 import {
   type MonitorTarget,
+  type RunBudget,
   type CheckResultWithLocation,
   type SSLCertificateInfo,
   success,
   failure,
   fetchWithTimeout,
   type Fetcher,
-  validateHttpStatusAndBody,
+  validateHttpResponse,
   parseTcpTarget,
   DEFAULT_HTTP_TIMEOUT,
   DEFAULT_SSL_EXPIRY_THRESHOLD_DAYS,
   createLogger,
   getErrorMessage,
   readJsonUpTo,
+  MAX_BODY_BYTES,
 } from '@flarewatch/shared';
 import * as z from 'zod/mini';
-
-/** A measurement carries the monitored site's response body, so its size is not ours to trust. */
-const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 const log = createLogger('GlobalPing');
 
 const GLOBALPING_API = 'https://api.globalping.io/v1/measurements';
 const API_TIMEOUT = 5000;
 const POLL_INTERVAL = 1000;
+/** One request creates a measurement and one polls it; the run budget pays for these up front. */
+export const PREPAID_REQUESTS = 2;
 
 interface GlobalPingConfig {
   token: string;
@@ -95,22 +96,13 @@ function buildTcpRequest(target: MonitorTarget, config: GlobalPingConfig) {
 function buildHttpRequest(target: MonitorTarget, config: GlobalPingConfig) {
   const targetUrl = new URL(target.target);
 
-  if (target.body) {
-    throw new Error('Custom body not supported with GlobalPing');
-  }
-
-  const method = target.method.toUpperCase();
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    throw new Error(`Method ${method} not supported with GlobalPing (only GET, HEAD, OPTIONS)`);
-  }
-
   return {
     type: 'http',
     target: targetUrl.hostname,
     locations: config.magic ? [{ magic: config.magic }] : undefined,
     measurementOptions: {
       request: {
-        method,
+        method: target.method,
         path: targetUrl.pathname,
         query: targetUrl.search || undefined,
         headers: {
@@ -139,16 +131,15 @@ function calculateCertExpiry(expiresAt: string) {
   return { expiryDate, daysUntilExpiry };
 }
 
-function validateHttpResult(
+async function validateHttpResult(
   target: MonitorTarget,
   result: MeasurementResult['results'][0]['result'],
 ) {
   let ssl: SSLCertificateInfo | undefined;
 
-  let error = validateHttpStatusAndBody(result.statusCode ?? 0, result.rawBody ?? '', {
-    expectedCodes: target.expectedCodes,
-    responseKeyword: target.responseKeyword,
-    responseForbiddenKeyword: target.responseForbiddenKeyword,
+  let error = await validateHttpResponse(target, {
+    status: result.statusCode ?? 0,
+    body: result.rawBody ?? '',
   });
 
   const tls = result.tls;
@@ -200,7 +191,7 @@ async function createMeasurement(
   if (response.status !== 202) {
     const errorBody = z
       .object({ error: z.optional(z.object({ message: z.string() })) })
-      .safeParse(await readJsonUpTo(response, MAX_RESPONSE_BYTES));
+      .safeParse(await readJsonUpTo(response, MAX_BODY_BYTES));
     throw new Error(
       (errorBody.success ? errorBody.data.error?.message : undefined) ??
         `API error: ${response.status}`,
@@ -209,7 +200,7 @@ async function createMeasurement(
 
   const created = z
     .object({ id: z.string() })
-    .safeParse(await readJsonUpTo(response, MAX_RESPONSE_BYTES));
+    .safeParse(await readJsonUpTo(response, MAX_BODY_BYTES));
   if (!created.success) {
     throw new Error('invalid measurement creation response');
   }
@@ -231,9 +222,7 @@ async function pollMeasurement(
     const response = await fetcher(`${GLOBALPING_API}/${measurementId}`, {
       timeout: API_TIMEOUT,
     });
-    const parsed = measurementResultSchema.safeParse(
-      await readJsonUpTo(response, MAX_RESPONSE_BYTES),
-    );
+    const parsed = measurementResultSchema.safeParse(await readJsonUpTo(response, MAX_BODY_BYTES));
     if (!parsed.success) {
       throw new Error('invalid measurement payload');
     }
@@ -247,10 +236,10 @@ async function pollMeasurement(
   }
 }
 
-function parseMeasurementResult(
+async function parseMeasurementResult(
   target: MonitorTarget,
   measurement: MeasurementResult,
-): CheckResultWithLocation {
+): Promise<CheckResultWithLocation> {
   const probeResult = measurement.results[0];
   if (!probeResult) {
     throw new Error('No probe result returned');
@@ -271,7 +260,7 @@ function parseMeasurementResult(
   }
 
   const latency = Math.round(probeResult.result.timings?.total ?? 0);
-  const { error, ssl } = validateHttpResult(target, probeResult.result);
+  const { error, ssl } = await validateHttpResult(target, probeResult.result);
 
   if (error) {
     log.info('Check failed', { name: target.name, error, location });
@@ -285,13 +274,30 @@ function parseMeasurementResult(
 export class GlobalPingChecker {
   constructor(private readonly fetcher: Fetcher = fetchWithTimeout) {}
 
-  async check(target: MonitorTarget): Promise<CheckResultWithLocation> {
-    if (!target.checkProxy?.startsWith('globalping://')) {
-      throw new Error('Invalid GlobalPing proxy URL');
-    }
-
+  /**
+   * `url` is a `globalping://` location; the caller checks the monitor's method and body fit it.
+   * Each request past the prepaid ones spends one of `budget.subrequests`, and none starts after
+   * `budget.deadline`, so polling stops with the run even when the caller stopped waiting.
+   */
+  async check(
+    target: MonitorTarget,
+    url: string,
+    budget: RunBudget,
+  ): Promise<CheckResultWithLocation> {
+    let requests = 0;
+    const fetcher: Fetcher = async (input, options = {}) => {
+      const remaining = budget.deadline - Date.now();
+      if (remaining <= 0) throw new Error('the check run ended');
+      requests += 1;
+      if (requests > PREPAID_REQUESTS) {
+        if (budget.subrequests < 1) throw new Error('no subrequests left in this check run');
+        budget.subrequests -= 1;
+      }
+      const timeout = Math.min(options.timeout ?? API_TIMEOUT, remaining);
+      return this.fetcher(input, { ...options, timeout });
+    };
     try {
-      const config = parseProxyUrl(target.checkProxy);
+      const config = parseProxyUrl(url);
 
       const measurementRequest =
         target.method === 'TCP_PING'
@@ -299,10 +305,10 @@ export class GlobalPingChecker {
           : buildHttpRequest(target, config);
 
       log.info('Creating measurement', { name: target.name });
-      const measurementId = await createMeasurement(measurementRequest, config.token, this.fetcher);
+      const measurementId = await createMeasurement(measurementRequest, config.token, fetcher);
       const pollTimeout = (target.timeout ?? DEFAULT_HTTP_TIMEOUT) + 2000;
-      const measurement = await pollMeasurement(measurementId, pollTimeout, this.fetcher);
-      return parseMeasurementResult(target, measurement);
+      const measurement = await pollMeasurement(measurementId, pollTimeout, fetcher);
+      return await parseMeasurementResult(target, measurement);
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       const isTimeout = errorMessage.toLowerCase().includes('timeout');

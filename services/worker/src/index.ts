@@ -1,26 +1,28 @@
 import {
   type CheckContext,
   createLogger,
-  failure,
   type CheckResultWithLocation,
   type MonitorTarget,
   parseSecretWebhooks,
-  type WebhookConfig,
+  type Webhook,
   type WorkerConfig,
 } from '@flarewatch/shared';
 import { workerConfig } from '@flarewatch/config/worker';
 
+import { CHECK_NOW_PREFIX, handleCheckNow } from './check-now';
 import { getHub, type Env } from './env';
 import { handleHubRequest } from './hub/routes';
 import { handlePing, handlePingUrl } from './ping';
 import { getEdgeLocation } from './utils/location';
-import { checkMonitor } from './checkers';
+import { checkMonitor, runBudget } from './checkers';
 import {
   createNotifier,
   formatNotificationMessage,
   type NotificationContext,
+  routes,
 } from './notifications/webhook';
-import type { Alert, AlertPolicy, CheckRecord } from './hub/monitor-hub';
+import type { Alert, AlertOutcome, AlertPolicy } from './hub/alerts';
+import type { CheckRecord } from './hub/monitor-hub';
 
 // Durable Object classes must be exports of the Worker's main module.
 export { MonitorHub } from './hub/monitor-hub';
@@ -41,15 +43,14 @@ async function safeCallback<T extends unknown[]>(
 }
 
 /** The config's webhooks plus FLAREWATCH_WEBHOOKS, which keeps webhook URLs out of a public fork. */
-function alertWebhooks(
-  configured: WebhookConfig | undefined,
-  secret: string | undefined,
-): WebhookConfig | undefined {
-  if (!secret) return configured;
-  const { webhooks, issues } = parseSecretWebhooks(secret);
-  for (const issue of issues) log.error('Skipping part of FLAREWATCH_WEBHOOKS', { issue });
+function alertWebhooks(config: WorkerConfig, secret: string | undefined): Webhook[] {
+  const configured = config.notification?.webhook;
   const listed =
     configured === undefined ? [] : Array.isArray(configured) ? configured : [configured];
+  if (!secret) return listed;
+  const ids = config.monitors.map(({ id }) => id);
+  const { webhooks, issues } = parseSecretWebhooks(secret, ids);
+  for (const issue of issues) log.error('Skipping part of FLAREWATCH_WEBHOOKS', { issue });
   return [...listed, ...webhooks];
 }
 
@@ -59,7 +60,6 @@ export interface WorkerDeps {
     ctx: CheckContext,
   ) => Promise<CheckResultWithLocation>;
   readonly createNotifier: typeof createNotifier;
-  readonly formatNotificationMessage: typeof formatNotificationMessage;
   readonly getEdgeLocation: () => Promise<string>;
   readonly staticConfig: WorkerConfig;
 }
@@ -67,7 +67,6 @@ export interface WorkerDeps {
 const defaultWorkerDeps: WorkerDeps = {
   checkMonitor,
   createNotifier,
-  formatNotificationMessage,
   getEdgeLocation,
   staticConfig: workerConfig,
 };
@@ -80,61 +79,90 @@ export async function runChecks(env: Env, deps: WorkerDeps = defaultWorkerDeps):
   const hub = getHub(env);
 
   const currentTime = Math.floor(Date.now() / 1000);
-  const notifier = deps.createNotifier(
-    alertWebhooks(config.notification?.webhook, env.FLAREWATCH_WEBHOOKS),
-  );
+  const webhooks = alertWebhooks(config, env.FLAREWATCH_WEBHOOKS);
+  const notifier = deps.createNotifier(webhooks);
+  const budget = runBudget(config.monitors, webhooks.length);
 
+  const ctx: CheckContext = { env, budget };
   const records = await Promise.all(
     config.monitors.map(async (monitor): Promise<CheckRecord> => {
       if (monitor.method === 'HEARTBEAT') return { monitor };
       log.info('Checking monitor', { name: monitor.name });
-      try {
-        return { monitor, check: await deps.checkMonitor(monitor, { env }) };
-      } catch (error) {
-        log.error('Check failed', { monitor: monitor.id, error: String(error) });
-        return { monitor, check: { location, result: failure(`Check failed: ${String(error)}`) } };
-      }
+      return { monitor, check: await deps.checkMonitor(monitor, ctx) };
     }),
   );
 
   const policy: AlertPolicy | undefined = notifier
     ? {
         gracePeriodSeconds: (config.notification?.gracePeriod ?? 0) * 60,
-        skipIds: config.notification?.skipNotificationIds ?? [],
+        // A monitor no webhook takes is never claimed, so it cannot use up its tries.
+        skipIds: [
+          ...(config.notification?.skipNotificationIds ?? []),
+          ...config.monitors
+            .filter(({ id }) => !webhooks.some((webhook) => routes(webhook, id)))
+            .map(({ id }) => id),
+        ],
         skipErrorChanges: Boolean(config.notification?.skipErrorChangeNotification),
       }
     : undefined;
   const { updates, alerts } = await hub.record(currentTime, records, policy);
   const monitors = new Map(config.monitors.map((monitor) => [monitor.id, monitor]));
 
+  // runBudget held one request per webhook, so the first alert is paid for.
+  let prepaid = true;
   const deliver = async (batch: Alert[]) => {
-    const outcomes: { incident: number; delivered: boolean }[] = [];
-    if (!notifier) return outcomes;
+    const outcomes: AlertOutcome[] = [];
     for (const alert of batch) {
       const monitor = monitors.get(alert.monitorId);
-      if (!monitor) continue;
-      const ctx: NotificationContext = {
-        monitor,
-        isUp: alert.kind === 'up',
-        incidentStartTime: alert.incidentStartTime,
-        currentTime: alert.at ?? currentTime,
-        reason: alert.error,
-        timeZone: config.notification?.timeZone ?? 'UTC',
-        alsoDown: alert.alsoDown,
-      };
       let delivered = false;
-      try {
-        const results = await notifier.send(ctx, deps.formatNotificationMessage(ctx));
-        delivered = results.some((result) => result.success);
-      } catch (error) {
-        log.error('Alert failed', { monitor: monitor.id, error: String(error) });
+      if (notifier && monitor) {
+        const cost = webhooks.filter((webhook) => routes(webhook, monitor.id)).length;
+        if (prepaid) prepaid = false;
+        else if (budget.subrequests >= cost) budget.subrequests -= cost;
+        else {
+          outcomes.push({
+            incident: alert.incident,
+            kind: alert.kind,
+            reopenedAt: alert.reopenedAt,
+            run: alert.run,
+            delivered,
+            deferred: true,
+          });
+          continue;
+        }
+        const at = alert.at ?? currentTime;
+        const ctx: NotificationContext = {
+          monitor,
+          kind: alert.kind,
+          incidentStartTime: alert.incidentStartTime,
+          currentTime: at,
+          downtimeSeconds: at - alert.incidentStartTime,
+          reason: alert.error,
+          timeZone: config.notification?.timeZone ?? 'UTC',
+          alsoDown: alert.alsoDown,
+          ...(alert.reminder !== undefined && { reminder: alert.reminder }),
+        };
+        try {
+          const results = await notifier.send(ctx, formatNotificationMessage(ctx));
+          delivered = results.some((result) => result.success);
+        } catch (error) {
+          log.error('Alert failed', { monitor: monitor.id, error: String(error) });
+        }
       }
-      if (alert.kind === 'down') outcomes.push({ incident: alert.incident, delivered });
+      outcomes.push({
+        incident: alert.incident,
+        kind: alert.kind,
+        reopenedAt: alert.reopenedAt,
+        run: alert.run,
+        delivered,
+      });
     }
     return outcomes;
   };
-  const outcomes = await deliver(alerts);
-  if (outcomes.length > 0) await deliver(await hub.confirmAlerts(outcomes));
+  // Reporting a down alert's outcome can turn up the recovery of an outage that ended meanwhile.
+  for (let batch = alerts; batch.length > 0;) {
+    batch = await hub.confirmAlerts(await deliver(batch));
+  }
 
   for (const update of updates) {
     const monitor = monitors.get(update.monitorId);
@@ -178,17 +206,20 @@ const Worker = {
   ): Promise<Response> {
     const url = new URL(request.url);
 
-    // Internal binding only; add a secret check if this worker is ever routed publicly.
+    // Every route trusts its caller: only the status page's MONITOR_WORKER binding
+    // reaches this worker (workers_dev and preview_urls off, no routes; a test
+    // holds wrangler.toml to that). Routing it publicly needs an auth check first.
     if (url.pathname === '/trigger' && request.method === 'POST') {
       ctx.waitUntil(runChecks(env, deps));
       return Response.json({ success: true, message: 'Check triggered' }, { status: 202 });
+    }
+    if (url.pathname.startsWith(CHECK_NOW_PREFIX) && request.method === 'POST') {
+      return handleCheckNow(request, env, deps);
     }
 
     const hubResponse = await handleHubRequest(request, env);
     if (hubResponse) return hubResponse;
 
-    // Ping routes and /ping-url are only reachable through the MONITOR_WORKER
-    // service binding; the worker has no public ingress (workers_dev = false).
     if (url.pathname.startsWith('/ping/')) {
       return handlePing(request, env, deps.staticConfig);
     }

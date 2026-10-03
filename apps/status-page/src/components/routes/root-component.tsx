@@ -1,9 +1,15 @@
-import { getRouteApi, Outlet, HeadContent, Scripts, useMatch } from '@tanstack/react-router';
+import {
+  getRouteApi,
+  Outlet,
+  HeadContent,
+  Scripts,
+  useMatch,
+  useRouter,
+} from '@tanstack/react-router';
 import { Header } from '@/components/header';
 import { Footer } from '@/components/footer';
 import { VisitorViewBar } from '@/components/visitor-view-bar';
 import { getThemeInitScript } from '@/lib/theme-server';
-import { sanitizeThemeVars } from '@flarewatch/shared';
 
 const rootRoute = getRouteApi('__root__');
 
@@ -17,10 +23,10 @@ export function RootComponent() {
   const { view } = rootRoute.useSearch();
   const visitorView = session.viewer !== 'visitor' && view === 'visitor';
   const themeInitScript = getThemeInitScript(theme);
+  const nonce = useRouter().options.ssr?.nonce;
   const isDark = theme === 'dark';
   const title = statusPage?.title || 'FlareWatch';
   const favicon = statusPage?.favicon;
-  const themeVars = sanitizeThemeVars(statusPage?.themeVars);
 
   return (
     <html
@@ -29,7 +35,10 @@ export function RootComponent() {
       suppressHydrationWarning
     >
       <head>
-        <script>{themeInitScript}</script>
+        {/* Browsers hide a nonce from the DOM once the page loads, so hydration would see it missing. */}
+        <script nonce={nonce} suppressHydrationWarning>
+          {themeInitScript}
+        </script>
         <title>{title}</title>
         {favicon ? (
           <link rel="icon" href={favicon} />
@@ -40,8 +49,6 @@ export function RootComponent() {
           </>
         )}
         <HeadContent />
-
-        {themeVars && <style>{themeVars}</style>}
       </head>
       <body className="flex min-h-full flex-col bg-background font-sans text-foreground antialiased">
         {embedTheme === undefined ? (

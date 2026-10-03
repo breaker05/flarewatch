@@ -95,6 +95,33 @@ describe('HttpChecker', () => {
     expect(result.error).toBe('Forbidden keyword "secret" found in response');
   });
 
+  it('checks response headers and a JSON value', async () => {
+    const monitor = createMonitor({
+      responseHeaderEquals: { 'content-type': 'application/json' },
+      responseJsonPath: '$.checks[0].ok',
+      responseJsonValue: true,
+    });
+    const reply = (ok: boolean) =>
+      new Response(JSON.stringify({ checks: [{ ok }] }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    fetchMock.mockResolvedValueOnce(reply(true));
+    expect((await checker.check(monitor)).ok).toBe(true);
+
+    fetchMock.mockResolvedValueOnce(reply(false));
+    const result = await checker.check(monitor);
+    expect(result).toMatchObject({ ok: false, error: 'JSON value at $.checks[0].ok is not true' });
+  });
+
+  it('shows a connection failure the runtime does not explain as "Connection failed"', async () => {
+    fetchMock.mockRejectedValue(new Error('internal error; reference = af8u8m9eap4vgpst8jm117i3'));
+
+    const result = await checker.check(createMonitor());
+
+    expect(result).toMatchObject({ ok: false, error: 'Connection failed' });
+  });
+
   it('maps timeout-like errors to a consistent message using the configured timeout', async () => {
     fetchMock.mockRejectedValue(new Error('timeout'));
 

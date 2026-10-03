@@ -1,5 +1,11 @@
 import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { isValidMaintenance, type Maintenance, type MaintenanceConfig } from '@flarewatch/shared';
+import {
+  isJsonObject,
+  isValidMaintenance,
+  type Maintenance,
+  type MaintenanceConfig,
+  type MaintenanceRepeat,
+} from '@flarewatch/shared';
 import { compareByStart } from '../maintenance';
 import type { Snapshot } from '../public-view';
 import { qk } from './keys';
@@ -40,6 +46,7 @@ export type MaintenanceUpdatePatch = {
   end: string | null;
   monitors: string[] | null;
   color: string | null;
+  repeat?: MaintenanceRepeat | null;
 };
 
 async function requestOk(path: string, init: RequestInit): Promise<Response> {
@@ -48,8 +55,16 @@ async function requestOk(path: string, init: RequestInit): Promise<Response> {
     if (res.status === 401) {
       throw new SessionExpiredError();
     }
+    const body: unknown = await res
+      .clone()
+      .json()
+      .catch(() => null);
     const text = await res.text().catch(() => '');
-    throw new Error(text || `Request failed (${res.status})`);
+    throw new Error(
+      isJsonObject(body) && typeof body.error === 'string'
+        ? body.error
+        : text || `Request failed (${res.status})`,
+    );
   }
   return res;
 }

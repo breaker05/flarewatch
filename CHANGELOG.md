@@ -2,6 +2,62 @@
 
 All notable changes to FlareWatch will be documented in this file.
 
+## 3.3.0 - 2026-10-03
+
+Deploys no longer check for 1.x data in KV. If you are still on 1.x, follow the 3.0.0 entry below first.
+
+You can roll back to 3.2.0 on the same storage. A repeating maintenance window then shows as a one-off on its first date, and reminders count from the rollback. Nothing is lost, and updating again restores both.
+
+Your config's monitors are now checked field by field. A misspelt or unknown field, or a field of the wrong type, fails the unit tests and stops the deploy. Before, FlareWatch ignored it.
+
+### Added
+
+- Set `maxLatencyMs` on a website or API monitor to show it as degraded while its last check is slower than that. It sends no alert, opens no incident and doesn't change uptime. A maintenance window that covers the monitor keeps it up.
+- `/api/data` gives each monitor a `status`: `up`, `degraded`, `down`, `pending` or `running`.
+- **Check now** on a check monitor's page, for the operator. It runs that monitor's check once and shows the result there, without saving it. Scripts can do the same through `POST /api/admin/check`.
+- `confirmVia` checks a failing monitor once more from a second place, such as your own flarewatch-proxy or a Globalping probe, and records that result. A blip on one network path no longer opens an incident. See [Confirm from a second place](docs/monitors.md#confirm-from-a-second-place).
+- `responseHeaderEquals` checks response headers, and `responseJsonPath` with `responseJsonValue` checks one value in a JSON response. See [Monitors](docs/monitors.md#websites-and-apis).
+- Maintenance windows can repeat every day, week or month, on chosen weekdays or a day of the month, until a date or for good. Each run keeps its clock time in the time zone you pick, across daylight saving changes. The dashboard shows the current or next run, and History lists every run. Down alerts, error changes and reminders pause during each run. An outage that alerted before the run still sends its recovery. See [Repeating windows](docs/status-page.md#repeating-windows).
+- Send a monitor's alerts to some channels only: give a webhook `monitors`, a list of monitor IDs. Leave it out and the webhook gets every monitor's alerts, as before. See [Routing](docs/alerts.md#routing).
+- Reminders while a monitor stays down: set `reminderEveryChecks` on a monitor, at least 30. See [Reminders](docs/monitors.md#reminders).
+- The status page sends a Content-Security-Policy. Scripts run only from the page's own origin or with a nonce that changes on every request. See [API, badges and embeds](docs/status-page.md#api-badges-and-embeds).
+
+### Changed
+
+- A late job's badge says `DEGRADED` in yellow instead of `UP`. The badge's `degraded` and `colorDegraded` parameters change that.
+- Embeds show late, pending and running jobs the way the dashboard does.
+- A job that starts again while its outage is still open shows as down until it succeeds, on its row, in the banner and in the API.
+- A monitor that asks its check location for something it can't do fails with an error that names the setting, and the unit tests fail on it before deploy. Before, `sslCheckEnabled` on a check from the Worker, or on a proxy check with `checkProxyFallback`, passed without looking at the certificate, and `pingProtocol: 'icmp'` outside Globalping quietly ran a TCP check. See the table in [Monitors](docs/monitors.md#other-regions-and-private-networks).
+- Every check ends within 55 seconds of the check run's start. A longer `timeout` is cut to what is left.
+- A fallback or confirmation check, or an extra Globalping poll, runs only while the run has subrequests to spare under the free plan's 50, after the hub's calls and one request per alert webhook. No check sends a request after the run's 55 seconds.
+- A `TCP_PING` monitor with `expectedCodes`, `responseKeyword`, `responseForbiddenKeyword`, `responseJsonPath`, `responseHeaderEquals` or `sslCheckEnabled` now fails. Before, it passed on the connection alone.
+- `checkProxy: 'worker://...'` is gone. Remove it from your config.
+- The admin API rejects a maintenance window with a title, color or monitor list of the wrong type. Before, it dropped the field, and a `monitors` value that wasn't a list covered every monitor. A rejected window's error now says what's wrong. `null` leaves a field out when you create a window, as it already cleared one when you update it.
+- The config check rejects a webhook with a field FlareWatch doesn't know, so a misspelt `monitors` can't route every alert to that channel. In `FLAREWATCH_WEBHOOKS` the Worker logs the field, ignores it and still alerts the webhook.
+- An error change that no webhook accepts no longer counts toward the 5 an outage may send.
+- A Globalping measurement over 1 MiB fails the check, the same limit a direct check puts on a response body. Before, the limit was 4 MiB.
+- A maintenance window's description can be at most 2000 characters, its title 200, its color 64, and it can list at most 100 monitors with IDs of at most 100 characters. The hub keeps at most 100 windows and refuses a new one past that. You can still edit the ones it has, and a window saved before these limits still shows and pauses alerts.
+- The config check rejects a `statusPage` field FlareWatch doesn't know, so a misspelt one fails the deploy instead of being ignored. `theme`, `customCss`, `themeVars` and `poweredByUrl` are gone from `statusPage`. The first two did nothing. For `themeVars`, set the colours in `apps/status-page/src/styles.css` instead; the `:root` and `.dark` blocks at the top hold every variable. The footer link always points to the FlareWatch repository.
+- `logo` and `favicon` take a `data:image/` URL only for PNG, JPEG, GIF, WebP or ICO. An SVG data URL now fails the config check; use a path or an `https:` URL to the SVG file instead.
+- `logo` and `favicon` take a path, an `https:` URL or a `data:image/` URL. An `http:` URL now fails the config check, because the page's Content-Security-Policy blocks images from it.
+- A heartbeat monitor with a field FlareWatch doesn't know, such as a misspelt `graceSecond`, now fails the config check, as a check monitor does. Before, FlareWatch ignored it.
+- Heartbeat pings answer 503 when the Worker has no `HEARTBEAT_RATE_LIMIT` binding. Before, they were taken without a limit. The committed `wrangler.toml` has the binding, so keep it if you edit that file.
+- A monitor's page lists maintenance windows up to a year ahead. A window that starts later shows there once it is less than a year away.
+
+### Fixed
+
+- A proxy that reports a latency that is not a finite, non-negative number is treated as an invalid response. Before, one such value made the hub drop every monitor's samples for that hour.
+- A failed result a proxy reports no longer carries the proxy token into the public error text.
+- A `notification.timeZone` the runtime does not know fails the config check. Before, it passed, and then every alert failed at send time.
+- A connection failure the runtime reports as "internal error" with a log reference shows as "Connection failed". The full text stays in the worker's log.
+- A mass outage no longer loses down alerts to the free plan's request cap. Alerts a run cannot send wait for the following runs, and waiting does not count as a try. Before, an alert past the cap counted as failed, and after 10 runs it was dropped.
+- `vp run dev-status-page` serves the page again. Before, the browser got a 500 for a module that imports `cloudflare:workers` on the server only.
+- The `text` template called a recovery "still up" when it came in the same second as the outage began.
+- An alert's target URL no longer carries the user name and password from a monitor's `target`.
+- Browsers and proxies no longer cache the page that finishes a provider sign-in and sets the session cookie.
+- The maintenance dialog shows why a window was refused, such as "Too many maintenance windows", instead of the raw JSON reply.
+- A down alert no longer goes out twice when a stalled check run reports a failed delivery after a later run took the alert over.
+
 ## 3.2.0 - 2026-10-02
 
 The hub moves your history to its new storage once, when it first starts after the update. You can't roll back to 3.1.0 afterwards.

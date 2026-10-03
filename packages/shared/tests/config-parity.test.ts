@@ -1,5 +1,5 @@
-// Pins the accepted and rejected shapes inherited from the pre-Zod guards; webhook payload and
-// monitor method validation are intentionally stricter.
+// Pins the accepted and rejected shapes inherited from the pre-Zod guards; webhook payload,
+// monitor method and status page field validation are intentionally stricter.
 import { describe, expect, it } from 'vite-plus/test';
 import { configIssues, isValidMaintenance, parseMaintenances } from '../src/config';
 
@@ -18,15 +18,16 @@ const runtimeConfigCases: Array<[string, unknown, boolean]> = [
     false,
   ],
   ['ftp url rejected for GET', { monitors: [{ ...monitor, target: 'ftp://example.com' }] }, false],
-  [
-    'unknown monitor fields ignored',
-    { monitors: [{ ...monitor, tooltip: 5, expectedCodes: 'nope' }] },
-    true,
-  ],
+  // A misspelt or mistyped field must fail the deploy, not be ignored.
+  ['monitor field of the wrong type', { monitors: [{ ...monitor, tooltip: 5 }] }, false],
+  ['expectedCodes not a list', { monitors: [{ ...monitor, expectedCodes: 'nope' }] }, false],
+  ['misspelt monitor field', { monitors: [{ ...monitor, expectedCode: [200] }] }, false],
   ['monitor timeout of a minute', { monitors: [{ ...monitor, timeout: 60_000 }] }, true],
   ['monitor timeout over a minute', { monitors: [{ ...monitor, timeout: 60_001 }] }, false],
   ['monitor timeout of zero', { monitors: [{ ...monitor, timeout: 0 }] }, false],
   ['monitor timeout as a string', { monitors: [{ ...monitor, timeout: '5000' }] }, false],
+  ['monitor maxLatencyMs of one', { monitors: [{ ...monitor, maxLatencyMs: 1 }] }, true],
+  ['monitor maxLatencyMs of zero', { monitors: [{ ...monitor, maxLatencyMs: 0 }] }, false],
   ['monitor link to a URL', { monitors: [{ ...monitor, link: 'https://a.com/x' }] }, true],
   ['monitor link turned off', { monitors: [{ ...monitor, link: false }] }, true],
   [
@@ -69,11 +70,6 @@ const runtimeConfigCases: Array<[string, unknown, boolean]> = [
     false,
   ],
   [
-    'javascript: poweredByUrl rejected',
-    { monitors: [], statusPage: { poweredByUrl: 'javascript:alert(1)' } },
-    false,
-  ],
-  [
     'data: image favicon and logo accepted',
     {
       monitors: [],
@@ -103,7 +99,7 @@ const runtimeConfigCases: Array<[string, unknown, boolean]> = [
   ],
   ['extra top-level keys ignored', { monitors: [], somethingElse: 42 }, true],
   ['statusPage title must be a string', { monitors: [], statusPage: { title: 5 } }, false],
-  ['statusPage other fields ignored', { monitors: [], statusPage: { theme: 42 } }, true],
+  ['statusPage theme must be a string', { monitors: [], statusPage: { theme: 42 } }, false],
   ['statusPage private visibility', { monitors: [], statusPage: { visibility: 'private' } }, true],
   // A typo must not silently leave a private page public.
   ['statusPage unknown visibility', { monitors: [], statusPage: { visibility: 'Private' } }, false],
@@ -220,7 +216,35 @@ const maintenanceCases: Array<[string, unknown, boolean]> = [
   ],
   ['monitors must be strings', { ...maintenanceBase, monitors: [1] }, false],
   ['colour must be a string', { ...maintenanceBase, color: 1 }, false],
+  [
+    'repeating window accepted',
+    { ...maintenanceBase, end: 3_600_003, repeat: { every: 'week', weekdays: [1] } },
+    true,
+  ],
+  [
+    'repeating window without an end rejected',
+    { ...maintenanceBase, repeat: { every: 'day' } },
+    false,
+  ],
+  [
+    'padded time zone rejected',
+    { ...maintenanceBase, end: 9, repeat: { every: 'day', timeZone: ' Europe/Berlin ' } },
+    false,
+  ],
+  [
+    'blank time zone rejected',
+    { ...maintenanceBase, end: 9, repeat: { every: 'day', timeZone: '' } },
+    false,
+  ],
+  ['padded body rejected', { ...maintenanceBase, body: ' b ' }, false],
   ['extra keys ignored', { ...maintenanceBase, whatever: {} }, true],
+  // Size caps apply when a window is written; one stored before them must still load.
+  ['stored body of 3000 characters accepted', { ...maintenanceBase, body: 'b'.repeat(3000) }, true],
+  [
+    'stored list of 101 monitors accepted',
+    { ...maintenanceBase, monitors: Array.from({ length: 101 }, (_, index) => `m${index}`) },
+    true,
+  ],
   ['not an object', 7, false],
 ];
 

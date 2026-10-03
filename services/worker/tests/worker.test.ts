@@ -1,22 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   type Fetcher,
+  isJsonObject,
   type Maintenance,
-  type Monitor,
   type MonitorTarget,
   type NotificationConfig,
   type WorkerConfig,
 } from '@flarewatch/shared';
 import type { Env } from '../src/env';
 import Worker, { runChecks, type WorkerDeps } from '../src/index';
-import { WebhookNotifier } from '../src/notifications/webhook';
+import { createNotifier, WebhookNotifier } from '../src/notifications/webhook';
 import { createHub, hubNamespace } from './helpers/hub';
+import { createWorkerDeps } from './helpers/worker-deps';
 
 const checkMonitorMock = vi.fn<WorkerDeps['checkMonitor']>();
 const getEdgeLocationMock = vi.fn<WorkerDeps['getEdgeLocation']>();
 const notifierSendMock = vi.fn<WebhookNotifier['send']>();
 const createNotifierMock = vi.fn<WorkerDeps['createNotifier']>();
-const formatNotificationMessageMock = vi.fn<WorkerDeps['formatNotificationMessage']>();
 const workerConfigMock: WorkerConfig = { monitors: [] };
 
 const NOW_SECONDS = Date.parse('2025-01-15T12:00:00Z') / 1000;
@@ -74,7 +74,6 @@ async function runScheduled(env: Env): Promise<void> {
   await runChecks(env, {
     checkMonitor: checkMonitorMock,
     createNotifier: createNotifierMock,
-    formatNotificationMessage: formatNotificationMessageMock,
     getEdgeLocation: getEdgeLocationMock,
     staticConfig: workerConfigMock,
   });
@@ -98,6 +97,119 @@ describe('scheduled handler', () => {
   });
 });
 
+describe('subrequests per check run', () => {
+  const PROXY = 'https://proxy.example.com/check';
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const HOOK = 'https://hooks.example.com/alert';
+
+  /** Fetches and hub calls in one run of 45 monitors that confirm through a proxy. */
+  async function countSubrequests(failing: number, notification?: NotificationConfig) {
+    const monitors = Array.from({ length: 45 }, (_, i) => ({
+      ...createMonitor(`m${i}`),
+      confirmVia: PROXY,
+    }));
+    const down = new Set(monitors.slice(0, failing).map((monitor) => monitor.target));
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === PROXY) {
+        return Response.json({ location: 'FRA', result: { ok: false, error: 'down' } });
+      }
+      return new Response('ok', { status: down.has(url) ? 503 : 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { hub, env } = createEnv();
+    const record = vi.spyOn(hub, 'record');
+    const confirmAlerts = vi.spyOn(hub, 'confirmAlerts');
+
+    await runChecks(env, {
+      ...createWorkerDeps({ monitors, ...(notification && { notification }) }),
+      createNotifier,
+    });
+
+    const hubCalls = record.mock.calls.length + confirmAlerts.mock.calls.length;
+    return {
+      // The edge-location lookup adds one on a cold isolate; the test deps answer it without a fetch.
+      total: fetchMock.mock.calls.length + hubCalls + 1,
+      hubCalls,
+      confirmations: fetchMock.mock.calls.filter(([input]) => input === PROXY).length,
+      alerts: fetchMock.mock.calls.filter(([input]) => input === HOOK).length,
+    };
+  }
+
+  it('stays under 50 with 10 of 45 monitors failing', async () => {
+    const { total, hubCalls, confirmations } = await countSubrequests(10);
+
+    expect(hubCalls).toBe(1);
+    expect(confirmations).toBeGreaterThan(0);
+    expect(total).toBeLessThan(50);
+  });
+
+  it('leaves each webhook a request that confirmations cannot spend', async () => {
+    const { confirmations, alerts } = await countSubrequests(4, { webhook: { url: HOOK } });
+
+    // 45 checks, the hub's record and alert confirmation, a cold edge lookup and one webhook.
+    expect(45 + confirmations + 2 + 1 + 1).toBeLessThanOrEqual(50);
+    expect(alerts).toBeGreaterThan(0);
+  });
+
+  it('sends a mass outage over the next runs and loses no alert to the request cap', async () => {
+    const monitors = Array.from({ length: 40 }, (_, i) => createMonitor(`m${i}`));
+    const hooks = ['https://a.example.com/alert', 'https://b.example.com/alert'];
+    const alerted = new Map(hooks.map((hook) => [hook, [] as string[]]));
+    let requests = 0;
+    let refused = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (input, init) => {
+        const url = input instanceof Request ? input.url : input.toString();
+        // The free plan refuses the 48th request of an invocation; the hub's calls take the rest.
+        if (++requests > 47) {
+          refused++;
+          throw new Error('Too many subrequests.');
+        }
+        const hook = alerted.get(url);
+        if (!hook) return new Response('down', { status: 503 });
+        const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
+        const text = isJsonObject(body) && typeof body.text === 'string' ? body.text : '';
+        hook.push(/Monitor (m\d+)(?!\d)/.exec(text)?.[1] ?? '?');
+        return new Response('ok');
+      }),
+    );
+    const { env } = createEnv();
+    const deps = {
+      ...createWorkerDeps({
+        monitors,
+        notification: { webhook: hooks.map((url) => ({ url, payload: { text: '$MSG' } })) },
+      }),
+      createNotifier,
+    };
+
+    let runs = 0;
+    do {
+      requests = 0;
+      await runChecks(env, deps);
+    } while (++runs < 20 && requests > monitors.length);
+
+    expect(refused).toBe(0);
+    // 40 checks leave 7 requests: the prepaid alert and two more at two webhooks each.
+    expect(runs).toBeLessThanOrEqual(15);
+    const ids = monitors.map((monitor) => monitor.id).sort();
+    for (const hook of hooks) expect(alerted.get(hook)?.sort()).toEqual(ids);
+  });
+
+  it('spends nothing on confirmations while every monitor is up', async () => {
+    const { total, confirmations } = await countSubrequests(0);
+
+    expect(confirmations).toBe(0);
+    expect(total).toBe(45 + 1 + 1);
+  });
+});
+
 describe('worker', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -113,7 +225,6 @@ describe('worker', () => {
     vi.spyOn(notifier, 'send').mockImplementation(notifierSendMock);
     createNotifierMock.mockImplementation((config) => (config ? notifier : null));
     notifierSendMock.mockResolvedValue([{ success: true }]);
-    formatNotificationMessageMock.mockReturnValue('notification');
     mockUp();
   });
 
@@ -132,10 +243,14 @@ describe('worker', () => {
       expect(notifierSendMock).toHaveBeenCalledTimes(1);
       expect(notifierSendMock.mock.calls[0]?.[0]).toMatchObject({
         monitor: { id: 'test-monitor' },
-        isUp: false,
+        kind: 'down',
         incidentStartTime: NOW_SECONDS,
         currentTime: NOW_SECONDS,
+        downtimeSeconds: 0,
       });
+      expect(notifierSendMock.mock.calls[0]?.[1]).toBe(
+        '🔴 Monitor test-monitor is down\nDetected at 1/15, 12:00\nReason: Unavailable',
+      );
     });
 
     it('does not notify before the grace period is reached', async () => {
@@ -228,7 +343,7 @@ describe('worker', () => {
       mockUp();
       await runScheduled(env);
       expect(notifierSendMock).toHaveBeenCalledTimes(2);
-      expect(notifierSendMock.mock.calls[1]?.[0]).toMatchObject({ isUp: true });
+      expect(notifierSendMock.mock.calls[1]?.[0]).toMatchObject({ kind: 'recovered' });
     });
 
     it('suppresses monitors in skipNotificationIds', async () => {
@@ -285,30 +400,6 @@ describe('worker', () => {
     const { MONITOR_HUB: _hub, ...env } = createEnv().env;
     await expect(runScheduled(env)).rejects.toThrow('MONITOR_HUB binding not found');
   });
-
-  describe('check execution', () => {
-    it('records a crashed check as down without aborting the run', async () => {
-      const rejectedMonitor = createMonitor('rejected');
-      const healthyMonitor = createMonitor('healthy');
-      workerConfigMock.monitors = [rejectedMonitor, healthyMonitor];
-      checkMonitorMock.mockImplementation(async (monitor: Monitor) => {
-        if (monitor.id === rejectedMonitor.id) {
-          throw new Error('Check crashed');
-        }
-        return { location: 'SFO', result: { ok: true, latency: 10 } };
-      });
-      const { hub, env } = createEnv();
-
-      await runScheduled(env);
-
-      const { monitors } = hub.view();
-      expect(monitors.healthy?.status).toBe('up');
-      expect(monitors.rejected).toMatchObject({
-        status: 'down',
-        incidents: [{ error: ['Check failed: Error: Check crashed'] }],
-      });
-    });
-  });
 });
 
 describe('hub routes for the status page', () => {
@@ -325,7 +416,6 @@ describe('hub routes for the status page', () => {
     Worker.fetch(new Request(`https://internal${path}`), env, {} as ExecutionContext, {
       checkMonitor: checkMonitorMock,
       createNotifier: createNotifierMock,
-      formatNotificationMessage: formatNotificationMessageMock,
       getEdgeLocation: getEdgeLocationMock,
       staticConfig: workerConfigMock,
     });
@@ -383,6 +473,53 @@ describe('hub routes for the status page', () => {
     expect(hub.view().maintenances).toEqual([]);
   });
 
+  it('refuses a window past 100 and a body over 64 KiB with a 400', async () => {
+    const { env } = createEnv(
+      Array.from({ length: 100 }, (_, index) => createMaintenance({ id: `w${index}` })),
+    );
+    const put = (id: string, body: string) =>
+      Worker.fetch(
+        new Request(`https://internal/maintenances/${id}`, { method: 'PUT', body }),
+        env,
+        {} as ExecutionContext,
+      );
+
+    const full = await put('new', JSON.stringify(createMaintenance({ id: 'new' })));
+    expect(full.status).toBe(400);
+    await expect(full.json()).resolves.toEqual({ error: 'Too many maintenance windows' });
+
+    const large = JSON.stringify({
+      ...createMaintenance({ id: 'w1' }),
+      pad: 'x'.repeat(64 * 1024),
+    });
+    expect((await put('w1', large)).status).toBe(400);
+  });
+
+  it('stores a window as normalized, with a padded time zone trimmed and a blank one as UTC', async () => {
+    const { hub, env } = createEnv();
+    const put = (id: string, timeZone: string) =>
+      Worker.fetch(
+        new Request(`https://internal/maintenances/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            ...createMaintenance({ id }),
+            end: new Date(NOW_SECONDS * 1000).toISOString(),
+            repeat: { every: 'day', timeZone },
+          }),
+        }),
+        env,
+        {} as ExecutionContext,
+      );
+
+    expect((await put('padded', ' Europe/Berlin ')).status).toBe(204);
+    expect((await put('blank', '')).status).toBe(204);
+
+    expect(hub.view().maintenances.map(({ id, repeat }) => [id, repeat])).toEqual([
+      ['blank', { every: 'day' }],
+      ['padded', { every: 'day', timeZone: 'Europe/Berlin' }],
+    ]);
+  });
+
   it('refuses an id whose percent-encoding is malformed', async () => {
     const { env } = createEnv();
     const send = (method: string, path: string) =>
@@ -395,5 +532,57 @@ describe('hub routes for the status page', () => {
     expect((await fetchRoute(env, '/latency/%E0%A4%A')).status).toBe(400);
     expect((await send('PUT', '/maintenances/%ZZ')).status).toBe(400);
     expect((await send('DELETE', '/maintenances/%ZZ')).status).toBe(400);
+  });
+});
+
+describe('trigger route for the status page', () => {
+  const deps: WorkerDeps = {
+    checkMonitor: checkMonitorMock,
+    createNotifier: createNotifierMock,
+    getEdgeLocation: getEdgeLocationMock,
+    staticConfig: workerConfigMock,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    workerConfigMock.monitors = [createMonitor()];
+    delete workerConfigMock.notification;
+    delete workerConfigMock.callbacks;
+    getEdgeLocationMock.mockResolvedValue('SFO');
+    mockUp();
+  });
+
+  function trigger(env: Env, method: string) {
+    const pending: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (promise: Promise<unknown>) => pending.push(promise) };
+    const response = Worker.fetch(
+      new Request('https://internal/trigger', { method }),
+      env,
+      ctx as typeof ctx & ExecutionContext,
+      deps,
+    );
+    return { response, pending };
+  }
+
+  it('answers at once and records a full check run in the background', async () => {
+    const { hub, env } = createEnv();
+
+    const { response, pending } = trigger(env, 'POST');
+
+    expect((await response).status).toBe(202);
+    await Promise.all(pending);
+    expect(hub.view().lastUpdate).toBeGreaterThan(0);
+    expect(hub.view().monitors['test-monitor']?.status).toBe('up');
+  });
+
+  it('starts nothing on a GET', async () => {
+    const { hub, env } = createEnv();
+
+    const { response, pending } = trigger(env, 'GET');
+
+    expect((await response).status).toBe(404);
+    expect(pending).toEqual([]);
+    expect(checkMonitorMock).not.toHaveBeenCalled();
+    expect(hub.view().lastUpdate).toBe(0);
   });
 });
