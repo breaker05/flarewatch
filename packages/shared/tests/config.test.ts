@@ -183,6 +183,22 @@ describe('config validation', () => {
     );
   });
 
+  it('rejects a target with a username and password', () => {
+    const config = createConfigWithMonitor({ target: 'https://user:secret@example.com/' });
+
+    expect(configIssues(config)).toEqual([
+      'monitor "api": GET target must not hold a username or password, send them in headers',
+    ]);
+  });
+
+  it.each([true, null, {}, ['a']])('names headers for the header value %j', (value) => {
+    const config = createConfigWithMonitor({ headers: { 'X-Test': value } });
+
+    expect(configIssues(config)).toEqual([
+      'monitor "api": headers must map names to strings or numbers',
+    ]);
+  });
+
   it('accepts TCP_PING with a host:port target', () => {
     const config = createConfigWithMonitor({ method: 'TCP_PING', target: 'example.com:443' });
 
@@ -340,6 +356,11 @@ describe('config validation', () => {
   it.each([
     [{ expectdCodes: [200] }, 'unknown field "expectdCodes"'],
     [{ expectedCodes: [200, 'x'] }, 'expectedCodes must be an integer from 100 to 599'],
+    [{ expectedCodes: [] }, 'expectedCodes must list at least one status code'],
+    [{ responseKeyword: '' }, 'responseKeyword must be a non-empty string'],
+    [{ responseForbiddenKeyword: '' }, 'responseForbiddenKeyword must be a non-empty string'],
+    [{ responseHeaderEquals: {} }, 'responseHeaderEquals must name at least one header'],
+    [{ responseHeaderEquals: { '': 'x' } }, 'responseHeaderEquals: bad header name'],
     [{ responseJsonPath: 'status', responseJsonValue: 'ok' }, 'responseJsonPath must be a path'],
     [{ responseJsonPath: '$.status' }, 'responseJsonPath and responseJsonValue go together'],
     [{ responseJsonValue: 'ok' }, 'responseJsonPath and responseJsonValue go together'],
@@ -359,6 +380,15 @@ describe('config validation', () => {
     ],
   ])('rejects the monitor field %j and names the rule', (overrides, rule) => {
     expect(configIssues(createConfigWithMonitor(overrides)).join('\n')).toContain(rule);
+  });
+
+  it.each([
+    { expectedCodes: [200] },
+    { responseKeyword: 'x' },
+    { responseForbiddenKeyword: 'x' },
+    { responseHeaderEquals: { 'X-A': '' } },
+  ])('accepts the shortest useful value %j', (overrides) => {
+    expect(configIssues(createConfigWithMonitor(overrides))).toEqual([]);
   });
 
   it('never quotes a check location, which can hold a token', () => {
