@@ -23,7 +23,6 @@ export const workerConfig: WorkerConfig = {
       target: 'https://pages.dashmarketing.io',
       expectedCodes: [200],
       timeout: 10000,
-      link: true,
     },
     {
       id: 'dash_core',
@@ -32,7 +31,6 @@ export const workerConfig: WorkerConfig = {
       target: 'https://portal.dashmarketing.io',
       expectedCodes: [200],
       timeout: 10000,
-      link: 'https://www.cloudflarestatus.com', // Links to status page, not the API endpoint
-    }
+    },
   ],
 };
