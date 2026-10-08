@@ -18,7 +18,7 @@
   "main": "@tanstack/react-start/server-entry",
   "workers_dev": true,
   // Example custom domain route:
-  // "routes": [{ "pattern": "status.example.com", "custom_domain": true }],
+  "routes": [{ "pattern": "status.dashmarketing.io", "custom_domain": true }],
   "observability": {
     "enabled": true,
   },

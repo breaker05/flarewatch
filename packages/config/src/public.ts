@@ -8,6 +8,6 @@ export const pageConfig: PageConfig = {
   ],
   group: {
     Websites: ['dash_pages', 'dash_core'],
-    APIs: ['dash_api'],
+    APIs: ['dash_api-alive', 'dash_api-infrastructure'],
   },
 };
