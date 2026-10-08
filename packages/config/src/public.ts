@@ -7,8 +7,7 @@ export const pageConfig: PageConfig = {
     { label: 'Dash Core', link: 'https://portal.dashmarketing.io' },
   ],
   group: {
-    Websites: ['dash_api'],
-    APIs: ['dash_api', 'demo_one_dns_trace'],
-    'Status Feeds': ['demo_cloudflare_status', 'demo_github_status'],
+    Websites: ['dash_pages', 'dash_core'],
+    APIs: ['dash_api']
   },
 };
