@@ -8,12 +8,11 @@ export const workerConfig: WorkerConfig = {
    */
   monitors: [
     {
-      id: 'demo_example',
-      name: 'Example Domain',
+      id: 'dash_api',
+      name: 'Dash API',
       method: 'GET',
-      target: 'https://example.com',
+      target: 'https://api.dashmarketing.io',
       expectedCodes: [200],
-      responseKeyword: 'Example Domain',
       timeout: 10000,
       link: false,
     },
