@@ -44,4 +44,11 @@ export const workerConfig: WorkerConfig = {
       link: 'https://portal.dashmarketing.io/status',
     },
   ],
+  /**
+   * Webhook URLs live in the FLAREWATCH_WEBHOOKS GitHub secret, not here.
+   */
+  notification: {
+    gracePeriod: 2,
+    timeZone: 'America/New_York',
+  },
 };
