@@ -35,7 +35,7 @@ export const workerConfig: WorkerConfig = {
       link: 'https://pages.dashmarketing.io/status',
     },
     {
-      id: 'dash_core',
+      id: 'dash_core_platform',
       name: 'Dash Core Platform',
       method: 'GET',
       target: 'https://portal.dashmarketing.io/status',
