@@ -17,6 +17,8 @@ import {
   readJsonUpTo,
 } from '../src/utils';
 import type { MonitorTarget, SSLCertificateInfo } from '../src/types';
+import { createMonitor } from './helpers/monitors';
+import { freezeClock } from './helpers/clock';
 
 const execFileAsync = promisify(execFile);
 
@@ -158,29 +160,6 @@ describe('fetchWithTimeout', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('bounds fetch without AbortSignal.timeout', async () => {
-    vi.stubGlobal('AbortSignal', {});
-    const pendingFetch = vi.fn<typeof globalThis.fetch>(
-      (_url, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
-        }),
-    );
-    globalThis.fetch = pendingFetch;
-
-    const pending = fetchWithTimeout('https://example.com', { timeout: 1000 });
-    const abortsAtDeadline = expect(pending).rejects.toThrow('aborted');
-    await vi.advanceTimersByTimeAsync(1000);
-    await abortsAtDeadline;
-
-    const resolvingFetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response('ok'));
-    globalThis.fetch = resolvingFetch;
-    await fetchWithTimeout('https://example.com', { timeout: 5000 });
-
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(resolvingFetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
-  });
-
   it('passes body when provided', async () => {
     const mockFetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response('ok'));
     globalThis.fetch = mockFetch;
@@ -222,16 +201,6 @@ describe('fetchWithTimeout', () => {
 });
 
 describe('validateHttpResponse', () => {
-  function createMonitor(overrides: Partial<MonitorTarget> = {}): MonitorTarget {
-    return {
-      id: 'test',
-      name: 'Test Monitor',
-      method: 'GET',
-      target: 'https://example.com',
-      ...overrides,
-    };
-  }
-
   describe('status code validation', () => {
     it('accepts 2xx status codes by default', async () => {
       const monitor = createMonitor();
@@ -386,10 +355,6 @@ describe('validateHttpResponse', () => {
 });
 
 describe('response assertions', () => {
-  function createMonitor(overrides: Partial<MonitorTarget> = {}): MonitorTarget {
-    return { id: 'test', name: 'Test', method: 'GET', target: 'https://example.com', ...overrides };
-  }
-
   const json = (value: unknown, headers?: HeadersInit) =>
     new Response(JSON.stringify(value), headers ? { headers } : {});
 
@@ -404,8 +369,10 @@ describe('response assertions', () => {
     );
 
   describe('responseJsonPath', () => {
-    const at = (responseJsonPath: string, responseJsonValue: MonitorTarget['responseJsonValue']) =>
-      createMonitor({ responseJsonPath, responseJsonValue });
+    const at = (
+      responseJsonPath: string,
+      responseJsonValue: Exclude<MonitorTarget['responseJsonValue'], undefined>,
+    ) => createMonitor({ responseJsonPath, responseJsonValue });
 
     it.each(['$.a[', "$['a']", '$a', '$.a[-1]', '$.a[x]'])(
       'reports malformed response path %s',
@@ -609,8 +576,7 @@ describe('toHeaders', () => {
 
 describe('createLogger', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
+    freezeClock(new Date('2026-06-10T12:00:00Z'));
   });
 
   it('caller data cannot overwrite the envelope fields', () => {

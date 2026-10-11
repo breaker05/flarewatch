@@ -5,7 +5,6 @@ import type { TemplateContext } from '../../src/notifications/templates/types';
 
 const baseContext: TemplateContext = {
   monitorName: 'Test Monitor',
-  monitorId: 'test-monitor',
   targetUrl: 'https://example.com',
   kind: 'down',
   isInitialOutage: true,
@@ -109,11 +108,13 @@ describe('notification templates', () => {
     );
   });
 
-  it('mattermost and rocketchat aliases produce the slack body', () => {
-    const slack = getTemplate('slack')(baseContext);
-    expect(getTemplate('mattermost')(baseContext).body).toBe(slack.body);
-    expect(getTemplate('rocketchat')(baseContext).body).toBe(slack.body);
-    expect(getTemplate('mattermost')(baseContext).method).toBe(slack.method);
+  it('mattermost and rocketchat share one body, with the reason in a code span so it pings no one', () => {
+    const ctx = { ...baseContext, reason: '@channel is down' };
+    const { body } = getTemplate('mattermost')(ctx);
+    expect(getTemplate('rocketchat')(ctx).body).toBe(body);
+    expect(body).toContain(
+      JSON.stringify({ title: 'Reason', value: '`@channel is down`', short: false }),
+    );
   });
 
   it('teams template sends an Adaptive Card with down and up states', () => {

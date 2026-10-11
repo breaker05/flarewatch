@@ -1,12 +1,12 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { defineConfig } from 'vite-plus/test/config';
+import { commonTestOptions } from '@flarewatch/vitest-config';
 
 export default defineConfig({
   cacheDir: '../../node_modules/.vite/worker',
   resolve: {
     alias: {
-      '@': path.resolve(import.meta.dirname, '../../apps/status-page/src'),
       'cloudflare:workers': path.resolve(
         import.meta.dirname,
         './tests/helpers/cloudflare-workers.ts',
@@ -16,12 +16,7 @@ export default defineConfig({
     },
   },
   test: {
-    globals: true,
-    environment: 'node',
+    ...commonTestOptions,
     include: ['tests/**/*.test.ts'],
-    setupFiles: ['../../vitest.setup.ts'],
-    restoreMocks: true,
-    unstubEnvs: true,
-    unstubGlobals: true,
   },
 });

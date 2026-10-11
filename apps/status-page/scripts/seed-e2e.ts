@@ -2,7 +2,7 @@ import { cpSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { HeartbeatRun, HeartbeatState, Maintenance } from '@flarewatch/shared';
 import { formatUtcShort, isJsonObject } from '@flarewatch/shared/utils';
-import type { HubFixture } from '../../../services/worker/tests/e2e/hub-fixture.ts';
+import type { HubFixture } from '@flarewatch/shared/testing/hub-fixture';
 import { privateMonitor } from '../tests/e2e/config/worker.ts';
 
 // Writes the hub fixture that the monitor Worker's test entry loads into an
@@ -61,6 +61,11 @@ const workerConfig = {
   compatibility_date: '2026-09-30',
   durable_objects: { bindings: [{ name: 'MONITOR_HUB', class_name: 'MonitorHub' }] },
   migrations: [{ tag: 'v1', new_sqlite_classes: ['MonitorHub'] }],
+  // A known secret and the limiter, so a test can send the pings a job sends.
+  vars: { HEARTBEAT_SECRET: 'e2e-heartbeat-secret' },
+  ratelimits: [
+    { name: 'HEARTBEAT_RATE_LIMIT', namespace_id: '1001', simple: { limit: 30, period: 60 } },
+  ],
   alias: {
     '@flarewatch/config/worker': path.join(appDir, 'tests/e2e/config/worker.ts'),
     '@flarewatch/e2e-hub-fixture': fixturePath,

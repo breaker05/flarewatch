@@ -18,6 +18,8 @@ import { singleLine } from './templates/format';
 
 const log = createLogger('Webhook');
 
+export const DEFAULT_WEBHOOK_TIMEOUT_MS = 5000;
+
 function createDateFormatter(timeZone: string) {
   return new Intl.DateTimeFormat('en-US', {
     month: 'numeric',
@@ -222,7 +224,6 @@ export function buildTemplateContext(ctx: NotificationContext, webhook: Webhook)
 
   return {
     monitorName: monitor.name,
-    monitorId: monitor.id,
     targetUrl: withoutCredentials(
       'target' in monitor ? monitor.target : typeof monitor.link === 'string' ? monitor.link : '',
     ),
@@ -271,7 +272,15 @@ export class WebhookNotifier {
     ctx: NotificationContext,
     message: string,
   ): Promise<WebhookResult> {
-    const { url, template, method, headers, payload, payloadType, timeout = 5000 } = webhook;
+    const {
+      url,
+      template,
+      method,
+      headers,
+      payload,
+      payloadType,
+      timeout = DEFAULT_WEBHOOK_TIMEOUT_MS,
+    } = webhook;
     let finalUrl = url;
     try {
       let requestInit: RequestInit;
@@ -319,7 +328,7 @@ export class WebhookNotifier {
       const response = await this.fetcher(finalUrl, {
         ...requestInit,
         timeout,
-        redirect: 'error',
+        redirect: 'manual',
       });
 
       if (!response.ok) {

@@ -18,6 +18,7 @@ import { checkExternalProxy } from './proxy';
 import { checkDns } from './dns';
 import { checkDomain } from './domain';
 import { checkVpc } from './vpc';
+import { ROW_BYTES } from '../hub/sql';
 
 const log = createLogger('Check');
 
@@ -212,6 +213,25 @@ export function capacityIssue(monitors: readonly Monitor[], webhooks: number): s
     : undefined;
 }
 
+/** A sample's bytes besides its JSON id: a 5-digit latency and a 64-character location, each character escaped to 6 bytes. */
+const SAMPLE_BYTES = 400;
+/** Each run's key in the hour: a quoted 10-digit time and its braces. */
+const RUN_BYTES = 16;
+const encoder = new TextEncoder();
+
+export function latencyRowIssue(monitors: readonly Monitor[]): string | undefined {
+  let bytes = 60 * RUN_BYTES;
+  for (const monitor of monitors) {
+    if (monitor.method === 'HEARTBEAT') continue;
+    // The first run can record in the same hour as the scheduled ones.
+    const samples = Math.ceil(60 / checkInterval(monitor)) + 1;
+    bytes += samples * (encoder.encode(JSON.stringify(monitor.id)).byteLength + SAMPLE_BYTES);
+  }
+  return bytes > ROW_BYTES
+    ? `an hour of latency samples can take ${bytes} bytes, but the hub's row holds ${ROW_BYTES}: shorten the monitor ids`
+    : undefined;
+}
+
 /**
  * The budget for one check run starting now: its deadline and the subrequests left for extras.
  * Each webhook is held one request first, so the first alert of the run always goes out.
@@ -220,10 +240,11 @@ export function runBudget(
   monitors: readonly Monitor[],
   webhooks: number,
   now = Date.now(),
+  windowMs = CHECK_WINDOW_MS,
 ): RunBudget {
   const primaries = monitors.reduce((sum, monitor) => sum + primaryCost(monitor), 0);
   return {
-    deadline: now + CHECK_WINDOW_MS,
+    deadline: now + windowMs,
     subrequests: Math.max(0, checkRoom(webhooks) - primaries),
   };
 }

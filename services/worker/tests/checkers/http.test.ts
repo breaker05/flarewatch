@@ -1,25 +1,12 @@
-import { describe, it, expect, beforeEach, vi } from 'vite-plus/test';
-import type { Fetcher, MonitorTarget } from '@flarewatch/shared';
+import { describe, it, expect, vi } from 'vite-plus/test';
+import type { Fetcher } from '@flarewatch/shared';
 import { HttpChecker } from '../../src/checkers/http';
+import { createMonitor } from '@flarewatch/shared/testing/monitors';
 
 const fetchMock = vi.fn<Fetcher>();
 const checker = new HttpChecker(fetchMock);
 
-function createMonitor(overrides: Partial<MonitorTarget> = {}): MonitorTarget {
-  return {
-    id: 'test-monitor',
-    name: 'Test Monitor',
-    method: 'GET',
-    target: 'https://example.com',
-    ...overrides,
-  };
-}
-
 describe('HttpChecker', () => {
-  beforeEach(() => {
-    fetchMock.mockReset();
-  });
-
   it('adds user-agent header when missing', async () => {
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }));
 

@@ -20,6 +20,7 @@ import {
   formatNotificationMessage,
   type NotificationContext,
   routes,
+  DEFAULT_WEBHOOK_TIMEOUT_MS,
 } from './notifications/webhook';
 import type { Alert, AlertOutcome, AlertPolicy } from './hub/alerts';
 import type { CheckRecord } from './hub/monitor-hub';
@@ -35,6 +36,12 @@ function checkDue(monitor: MonitorTarget, minute: number): boolean {
 export { MonitorHub } from './hub/monitor-hub';
 
 const log = createLogger('Worker');
+/**
+ * Cloudflare ends waitUntil work 30 seconds after the response, so the first run ends its
+ * checks early and starts only the alerts that finish in time. Later runs send the rest.
+ */
+const TRIGGER_WINDOW_MS = 20_000;
+const TRIGGER_DELIVERY_MS = 27_000;
 
 async function safeCallback<T extends unknown[]>(
   callback: ((...args: T) => Promise<void>) | undefined,
@@ -83,6 +90,7 @@ export async function runChecks(
   deps: WorkerDeps = defaultWorkerDeps,
   scheduledAt?: number,
   spentSubrequests = 0,
+  triggered = false,
 ): Promise<void> {
   const startedAt = Date.now();
   const location = await deps.getEdgeLocation();
@@ -105,8 +113,14 @@ export async function runChecks(
       monitors: due.filter(({ id }) => !dueIds.has(id)).map(({ id }) => id),
     });
   }
-  const budget = runBudget(checks, webhooks.length, startedAt);
+  const budget = runBudget(
+    checks,
+    webhooks.length,
+    startedAt,
+    triggered ? TRIGGER_WINDOW_MS : undefined,
+  );
   budget.subrequests = Math.max(0, budget.subrequests - spentSubrequests);
+  const deliverBy = triggered ? startedAt + TRIGGER_DELIVERY_MS : Infinity;
 
   const ctx: CheckContext = { env, budget };
   const records = await Promise.all(
@@ -197,12 +211,14 @@ export async function runChecks(
       for (const webhook of webhooks) {
         const routed = entries.filter(({ alert, ctx }) => ctx && routes(webhook, alert.monitorId));
         if (routed.length === 0) continue;
+        const inTime = () =>
+          Date.now() + (webhook.timeout ?? DEFAULT_WEBHOOK_TIMEOUT_MS) <= deliverBy;
         let next = 0;
         if (routed.length < summaryAfter) {
-          for (; next < routed.length - 1 && spend(false); next++)
+          for (; next < routed.length - 1 && inTime() && spend(false); next++)
             await send(webhook, [routed[next]!]);
         }
-        if (spend(true)) await send(webhook, routed.slice(next));
+        if (inTime() && spend(true)) await send(webhook, routed.slice(next));
       }
     }
     return entries.map(({ alert, delivered, attempted }): AlertOutcome => ({
@@ -260,7 +276,7 @@ const Worker = {
     // holds wrangler.toml to that). Routing it publicly needs an auth check first.
     if (url.pathname === '/trigger' && request.method === 'POST') {
       const admitted = await getHub(env).claimInitialCheck(Date.now());
-      if (admitted) ctx.waitUntil(runChecks(env, deps, undefined, 1));
+      if (admitted) ctx.waitUntil(runChecks(env, deps, undefined, 1, true));
       return Response.json(
         {
           success: true,
