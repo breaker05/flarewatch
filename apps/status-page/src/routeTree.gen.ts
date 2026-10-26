@@ -24,6 +24,7 @@ import { Route as MonitorsMonitorIdRouteImport } from './routes/monitors.$monito
 import { Route as PingSplatRouteImport } from './routes/ping.$'
 import { Route as ApiAdminAnnouncementsRouteImport } from './routes/api/admin/announcements'
 import { Route as ApiAdminCheckRouteImport } from './routes/api/admin/check'
+import { Route as ApiAdminIncidentsRouteImport } from './routes/api/admin/incidents'
 import { Route as ApiAdminMaintenancesRouteImport } from './routes/api/admin/maintenances'
 import { Route as ApiAdminSessionRouteImport } from './routes/api/admin/session'
 
@@ -102,6 +103,11 @@ const ApiAdminCheckRoute = ApiAdminCheckRouteImport.update({
   path: '/api/admin/check',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiAdminIncidentsRoute = ApiAdminIncidentsRouteImport.update({
+  id: '/api/admin/incidents',
+  path: '/api/admin/incidents',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAdminMaintenancesRoute = ApiAdminMaintenancesRouteImport.update({
   id: '/api/admin/maintenances',
   path: '/api/admin/maintenances',
@@ -129,6 +135,7 @@ export interface FileRoutesByFullPath {
   '/ping/$': typeof PingSplatRoute
   '/api/admin/announcements': typeof ApiAdminAnnouncementsRoute
   '/api/admin/check': typeof ApiAdminCheckRoute
+  '/api/admin/incidents': typeof ApiAdminIncidentsRoute
   '/api/admin/maintenances': typeof ApiAdminMaintenancesRoute
   '/api/admin/session': typeof ApiAdminSessionRoute
 }
@@ -148,6 +155,7 @@ export interface FileRoutesByTo {
   '/ping/$': typeof PingSplatRoute
   '/api/admin/announcements': typeof ApiAdminAnnouncementsRoute
   '/api/admin/check': typeof ApiAdminCheckRoute
+  '/api/admin/incidents': typeof ApiAdminIncidentsRoute
   '/api/admin/maintenances': typeof ApiAdminMaintenancesRoute
   '/api/admin/session': typeof ApiAdminSessionRoute
 }
@@ -168,6 +176,7 @@ export interface FileRoutesById {
   '/ping/$': typeof PingSplatRoute
   '/api/admin/announcements': typeof ApiAdminAnnouncementsRoute
   '/api/admin/check': typeof ApiAdminCheckRoute
+  '/api/admin/incidents': typeof ApiAdminIncidentsRoute
   '/api/admin/maintenances': typeof ApiAdminMaintenancesRoute
   '/api/admin/session': typeof ApiAdminSessionRoute
 }
@@ -189,6 +198,7 @@ export interface FileRouteTypes {
     | '/ping/$'
     | '/api/admin/announcements'
     | '/api/admin/check'
+    | '/api/admin/incidents'
     | '/api/admin/maintenances'
     | '/api/admin/session'
   fileRoutesByTo: FileRoutesByTo
@@ -208,6 +218,7 @@ export interface FileRouteTypes {
     | '/ping/$'
     | '/api/admin/announcements'
     | '/api/admin/check'
+    | '/api/admin/incidents'
     | '/api/admin/maintenances'
     | '/api/admin/session'
   id:
@@ -227,6 +238,7 @@ export interface FileRouteTypes {
     | '/ping/$'
     | '/api/admin/announcements'
     | '/api/admin/check'
+    | '/api/admin/incidents'
     | '/api/admin/maintenances'
     | '/api/admin/session'
   fileRoutesById: FileRoutesById
@@ -247,6 +259,7 @@ export interface RootRouteChildren {
   PingSplatRoute: typeof PingSplatRoute
   ApiAdminAnnouncementsRoute: typeof ApiAdminAnnouncementsRoute
   ApiAdminCheckRoute: typeof ApiAdminCheckRoute
+  ApiAdminIncidentsRoute: typeof ApiAdminIncidentsRoute
   ApiAdminMaintenancesRoute: typeof ApiAdminMaintenancesRoute
   ApiAdminSessionRoute: typeof ApiAdminSessionRoute
 }
@@ -358,6 +371,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAdminCheckRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/admin/incidents': {
+      id: '/api/admin/incidents'
+      path: '/api/admin/incidents'
+      fullPath: '/api/admin/incidents'
+      preLoaderRoute: typeof ApiAdminIncidentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/admin/maintenances': {
       id: '/api/admin/maintenances'
       path: '/api/admin/maintenances'
@@ -391,6 +411,7 @@ const rootRouteChildren: RootRouteChildren = {
   PingSplatRoute: PingSplatRoute,
   ApiAdminAnnouncementsRoute: ApiAdminAnnouncementsRoute,
   ApiAdminCheckRoute: ApiAdminCheckRoute,
+  ApiAdminIncidentsRoute: ApiAdminIncidentsRoute,
   ApiAdminMaintenancesRoute: ApiAdminMaintenancesRoute,
   ApiAdminSessionRoute: ApiAdminSessionRoute,
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
 import {
+  deleteIncident,
   fetchAnnouncements,
   fetchHubView,
   fetchLatency,
@@ -225,5 +226,31 @@ describe('forwardPing', () => {
 
     expect(response.status).toBe(404);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+});
+
+describe('deleting an incident', () => {
+  it('maps the hub answer to an outcome', async () => {
+    const { fetch } = stubEnv();
+    fetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await expect(deleteIncident('api', 1700000000)).resolves.toBe('deleted');
+    expect(fetch).toHaveBeenCalledWith('https://internal/incidents/api/1700000000', {
+      method: 'DELETE',
+    });
+    fetch.mockResolvedValueOnce(new Response(null, { status: 404 }));
+    await expect(deleteIncident('api', 1)).resolves.toBe('missing');
+    fetch.mockResolvedValueOnce(
+      Response.json({ error: 'Incident is still open' }, { status: 409 }),
+    );
+    await expect(deleteIncident('api', 1)).resolves.toBe('open');
+  });
+
+  it('encodes the monitor id and throws on any other status', async () => {
+    const { fetch } = stubEnv();
+    fetch.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(deleteIncident('a b/c', 1)).rejects.toThrow('Deleting incident answered 500');
+    expect(fetch).toHaveBeenCalledWith('https://internal/incidents/a%20b%2Fc/1', {
+      method: 'DELETE',
+    });
   });
 });

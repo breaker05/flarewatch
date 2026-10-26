@@ -425,6 +425,10 @@ export class MonitorHub extends DurableObject<Env> {
     return true;
   }
 
+  deleteIncident(monitorId: string, start: number): 'deleted' | 'open' | 'missing' {
+    return this.sql.transaction(() => this.incidents.delete(monitorId, start));
+  }
+
   deleteMaintenance(id: string): boolean {
     const [row] = this.sql.exec<{ id: string }>(
       'DELETE FROM maintenances WHERE id = ? RETURNING id',
