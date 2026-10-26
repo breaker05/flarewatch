@@ -6,7 +6,7 @@ All notable changes to FlareWatch will be documented in this file.
 
 ### Added
 
-- Operators can delete an ended incident from History, and scripts through `DELETE /api/admin/incidents`. An ongoing incident cannot be deleted. See [Deleting an incident](docs/status-page.md#deleting-an-incident).
+- Operators can delete an ended incident from History, and scripts through `DELETE /api/admin/incidents`. An ongoing incident cannot be deleted. See [Deleting an incident](docs/status-page.md#deleting-an-incident). ([#1](https://github.com/breaker05/flarewatch/pull/1))
 
 ### Fixed
 
