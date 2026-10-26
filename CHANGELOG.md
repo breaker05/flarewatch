@@ -4,6 +4,10 @@ All notable changes to FlareWatch will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Operators can delete an ended incident from History, and scripts through `DELETE /api/admin/incidents`. An ongoing incident cannot be deleted. See [Deleting an incident](docs/status-page.md#deleting-an-incident). ([#1](https://github.com/breaker05/flarewatch/pull/1))
+
 ### Fixed
 
 - When a monitor fails again while its outage waits to close, an error-change alert that was being sent at that moment is handled as it would be otherwise. If no webhook accepted it, the outage gets its slot back. If a busy check run put it off, it goes out on a later run. Before, it was lost and used up one of the outage's five. A reminder sent at that moment now counts, so the next reminder has the right number. ([#103](https://github.com/saminnet/flarewatch/pull/103))

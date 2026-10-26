@@ -110,7 +110,7 @@ _Avoid_: Maintenance event, scheduled maintenance
 A notice with a title, body and optional end time that the operator posts on History. Active announcements appear on the dashboard.
 
 **Incident**:
-A stretch of downtime FlareWatch recorded for a monitor. A failure within 15 minutes after a recovery reopens the incident, and a reopened incident ends only after 15 minutes up. The up minutes between count as downtime.
+A stretch of downtime FlareWatch recorded for a monitor. A failure within 15 minutes after a recovery reopens the incident, and a reopened incident ends only after 15 minutes up. The up minutes between count as downtime. The operator can delete an ended incident; History, the feed and the admin API name one by its monitor id and the Unix second it began.
 _Avoid_: Outage, event
 
 ## Storage

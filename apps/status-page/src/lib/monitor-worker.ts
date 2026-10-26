@@ -103,6 +103,20 @@ export async function deleteAnnouncement(id: string): Promise<boolean> {
   return deleteRecord('announcements', id);
 }
 
+/** Removes a closed incident. The hub keeps an open one, and says so. */
+export async function deleteIncident(
+  monitorId: string,
+  start: number,
+): Promise<'deleted' | 'open' | 'missing'> {
+  const response = await callMonitorWorker(`/incidents/${encodeURIComponent(monitorId)}/${start}`, {
+    method: 'DELETE',
+  });
+  if (response.status === 404) return 'missing';
+  if (response.status === 409) return 'open';
+  if (!response.ok) throw new Error(`Deleting incident answered ${response.status}`);
+  return 'deleted';
+}
+
 async function deleteRecord(kind: 'maintenances' | 'announcements', id: string): Promise<boolean> {
   const response = await callMonitorWorker(`/${kind}/${encodeURIComponent(id)}`, {
     method: 'DELETE',

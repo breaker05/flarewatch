@@ -8,6 +8,7 @@ import { getHub, type Env } from '../env';
 
 const MAINTENANCE_PREFIX = '/maintenances/';
 const ANNOUNCEMENT_PREFIX = '/announcements/';
+const INCIDENT_PREFIX = '/incidents/';
 
 /**
  * The hub as the status page reads and edits it over its MONITOR_WORKER
@@ -30,6 +31,9 @@ export async function handleHubRequest(request: Request, env: Env): Promise<Resp
     const id = decodeId(pathname.slice('/latency/'.length));
     if (id === null) return Response.json({ error: 'Invalid id' }, { status: 400 });
     return Response.json(await getHub(env).latency(id, Math.floor(Date.now() / 1000)));
+  }
+  if (pathname.startsWith(INCIDENT_PREFIX)) {
+    return handleIncident(env, pathname, method);
   }
   if (!pathname.startsWith(MAINTENANCE_PREFIX)) {
     return handleAnnouncement(request, env, pathname, method);
@@ -86,6 +90,30 @@ async function handleAnnouncement(
     return new Response(null, { status: deleted ? 204 : 404 });
   }
   return null;
+}
+
+/** `/incidents/<monitor>/<start>`: deletes the closed incident that began at `start`. */
+async function handleIncident(
+  env: Env,
+  pathname: string,
+  method: string,
+): Promise<Response | null> {
+  if (method !== 'DELETE') return null;
+  const [monitorSegment, startSegment, ...rest] = pathname.slice(INCIDENT_PREFIX.length).split('/');
+  const monitorId = decodeId(monitorSegment ?? '');
+  if (monitorId === null || monitorId === '') {
+    return Response.json({ error: 'Invalid id' }, { status: 400 });
+  }
+  const start =
+    startSegment !== undefined && /^\d{1,15}$/.test(startSegment) ? Number(startSegment) : NaN;
+  if (Number.isNaN(start) || rest.length > 0) {
+    return Response.json({ error: 'Invalid start' }, { status: 400 });
+  }
+  const outcome = await getHub(env).deleteIncident(monitorId, start);
+  if (outcome === 'open') {
+    return Response.json({ error: 'Incident is still open' }, { status: 409 });
+  }
+  return new Response(null, { status: outcome === 'deleted' ? 204 : 404 });
 }
 
 /** A percent-encoded path segment, or null when its encoding is malformed. */

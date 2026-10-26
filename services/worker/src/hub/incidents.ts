@@ -209,6 +209,25 @@ export class Incidents {
     this.capClosed(open.monitorId);
   }
 
+  /**
+   * Deletes the closed incident of `monitorId` that began at `start`, the
+   * first timestamp of its first segment, which the feed and History use as
+   * its identity. An open one stays: the next check run owns it.
+   */
+  delete(monitorId: string, start: number): 'deleted' | 'open' | 'missing' {
+    const [row] = this.sql.exec<{ id: number; end_at: number | null }>(
+      `SELECT id, end_at FROM incidents
+       WHERE monitor_id = ? AND json_extract(starts, '$[0]') = ?`,
+      monitorId,
+      start,
+    );
+    if (!row) return 'missing';
+    if (row.end_at === null) return 'open';
+    this.sql.exec('DELETE FROM incidents WHERE id = ?', row.id);
+    this.trim(monitorId, (incident) => incident.start[0] !== start);
+    return 'deleted';
+  }
+
   /** Deletes the incidents that ended before `cutoff`. */
   expire(cutoff: number): void {
     const expired = this.sql.exec<{ monitor_id: string }>(

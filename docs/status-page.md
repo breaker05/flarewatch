@@ -115,6 +115,16 @@ Months with fewer than 31 days get no run, so this one skips November and runs a
 - The dashboard shows the current or next run. History lists each run in its month. Covered monitors send no down alerts during a run.
 - History keeps a repeating window for 90 days after `until` plus the length of one run. One without `until` stays until you delete it.
 
+## Deleting an incident
+
+An incident goes on its own 90 days after it ends. To remove one sooner, say a false alarm from a target that was being moved, sign in and open History. Each ended incident has a delete button, as maintenance windows do. Deleting takes the incident out of History, the uptime figures, the calendar and the feed. It cannot be undone, and an ongoing incident cannot be deleted: the next check run still owns it.
+
+Scripts send `DELETE /api/admin/incidents` with the [same authentication as maintenance](#admin-endpoints). An incident is named by its monitor's id and the Unix second it began, the same key the feed uses:
+
+| Method   | Body                                   | Result                                                                                        |
+| -------- | -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `DELETE` | `{"monitor":"api","start":1768478400}` | Status 204. 404 for an unknown incident, 409 while it is still open, 400 for a missing field. |
+
 ## Announcements
 
 Sign in and open History, then choose **Add announcement** beside **Add maintenance window**. Give it a title and body, and optionally an end time in UTC. Active announcements appear on the dashboard under the status banner, newest first. You edit and delete them on History, as you do maintenance windows. Titles and bodies show exactly as typed. HTML tags and Markdown appear as text, so `<b>` shows as `<b>` and doesn't make text bold.
@@ -200,6 +210,7 @@ These need the operator's sign-in: the session cookie, or the password sign-in's
 | -------------------------- | -------------------------------------------------------------------------------------------------- |
 | `/api/admin/maintenances`  | Lists, adds, edits and deletes [maintenance windows](#maintenance).                                |
 | `/api/admin/announcements` | Lists, adds, edits and deletes [announcements](#announcements).                                    |
+| `/api/admin/incidents`     | Deletes an [ended incident](#deleting-an-incident).                                                |
 | `/api/admin/check`         | `POST {"id": "<monitor>"}` runs that check monitor once and returns the result, without saving it. |
 
 ```bash

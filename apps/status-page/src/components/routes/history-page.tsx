@@ -16,6 +16,8 @@ import {
 import { EmptyState } from '@/components/ui/empty-state';
 import { UptimeCalendar } from '@/components/uptime-calendar/uptime-calendar';
 import { IncidentCard } from '@/components/history/incident-card';
+import { DeleteIncidentDialog } from '@/components/history/delete-incident-dialog';
+import type { IncidentEvent } from '@/components/history/types';
 import { MaintenanceEventCard } from '@/components/history/maintenance-event-card';
 import { MaintenanceFormDialog } from '@/components/maintenance/maintenance-form-dialog';
 import { DeleteMaintenanceDialog } from '@/components/maintenance/delete-maintenance-dialog';
@@ -41,6 +43,10 @@ type DialogTarget = { open: boolean; maintenance?: Maintenance; key: number };
 
 const CLOSED: DialogTarget = { open: false, key: 0 };
 
+type IncidentDialogTarget = { open: boolean; incident?: IncidentEvent; key: number };
+
+const NO_INCIDENT: IncidentDialogTarget = { open: false, key: 0 };
+
 export function HistoryPage() {
   usePageHydrated();
   const audience = useAudience();
@@ -50,12 +56,13 @@ export function HistoryPage() {
   } = useSuspenseQuery(snapshotQuery(audience));
   const [editing, setEditing] = useState(CLOSED);
   const [deleting, setDeleting] = useState(CLOSED);
+  const [deletingIncident, setDeletingIncident] = useState(NO_INCIDENT);
   const openFor = (maintenance?: Maintenance) => (prev: DialogTarget) => ({
     open: true,
     maintenance,
     key: prev.key + 1,
   });
-  const closeDialog = (prev: DialogTarget) => ({ ...prev, open: false });
+  const closeDialog = <T extends { open: boolean }>(prev: T) => ({ ...prev, open: false });
   const { loaderNowMs } = historyRoute.useLoaderData();
   const nowMs = useNow({ serverTime: loaderNowMs });
   const {
@@ -84,6 +91,13 @@ export function HistoryPage() {
     return {
       onEdit: () => setEditing(openFor(maintenance)),
       onDelete: () => setDeleting(openFor(maintenance)),
+    };
+  }
+
+  function incidentActions(incident: IncidentEvent) {
+    if (!operator) return {};
+    return {
+      onDelete: () => setDeletingIncident((prev) => ({ open: true, incident, key: prev.key + 1 })),
     };
   }
 
@@ -231,6 +245,7 @@ export function HistoryPage() {
                   <IncidentCard
                     key={`incident-${event.monitorId}-${event.start}-${event.end ?? 'open'}`}
                     event={event}
+                    {...incidentActions(event)}
                   />
                 ) : (
                   <MaintenanceEventCard
@@ -261,6 +276,12 @@ export function HistoryPage() {
             open={deleting.open}
             maintenance={deleting.maintenance}
             onClose={() => setDeleting(closeDialog)}
+          />
+          <DeleteIncidentDialog
+            key={deletingIncident.key}
+            open={deletingIncident.open}
+            incident={deletingIncident.incident}
+            onClose={() => setDeletingIncident(closeDialog)}
           />
         </>
       )}
