@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { workerConfig } from '@flarewatch/config/worker';
 import { Route } from '@/routes/api/badge';
-import { callBadge, stubBadgeView } from '../helpers/badge';
+import { BADGE_MONITORS, callBadge, stubBadgeView } from '../helpers/badge';
 import { forgetViewAroundEachTest } from '../helpers/snapshots';
 
+workerConfig.monitors = BADGE_MONITORS;
 const originalMonitors = workerConfig.monitors;
 afterEach(() => {
   workerConfig.monitors = originalMonitors;

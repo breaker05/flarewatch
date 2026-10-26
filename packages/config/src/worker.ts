@@ -14,6 +14,7 @@ export const workerConfig: WorkerConfig = {
       target: 'https://api.dashmarketing.io/health/live',
       expectedCodes: [200],
       timeout: 10000,
+      downAfterChecks: 3,
       link: false,
     },
     {
@@ -23,6 +24,7 @@ export const workerConfig: WorkerConfig = {
       target: 'https://api.dashmarketing.io/health/ready',
       expectedCodes: [200],
       timeout: 10000,
+      downAfterChecks: 3,
       link: false,
     },
     {
@@ -32,6 +34,7 @@ export const workerConfig: WorkerConfig = {
       target: 'https://pages.dashmarketing.io/status',
       expectedCodes: [200],
       timeout: 10000,
+      downAfterChecks: 3,
       link: 'https://pages.dashmarketing.io/status',
     },
     {
@@ -41,6 +44,7 @@ export const workerConfig: WorkerConfig = {
       target: 'https://portal.dashmarketing.io/status',
       expectedCodes: [200],
       timeout: 10000,
+      downAfterChecks: 3,
       link: 'https://portal.dashmarketing.io/status',
     },
   ],
