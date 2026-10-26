@@ -10,8 +10,8 @@ import { Button } from '@/components/ui/button';
 import { IconX } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
 import { formatUtc } from '@/lib/date';
-import type { AggregatedDayData, AggregatedDayIncident } from '@/lib/uptime';
-import { STATUS_DOT_COLORS } from '@/lib/constants';
+import { formatPercent, type AggregatedDayData, type AggregatedDayIncident } from '@/lib/uptime';
+import { STATUS_COLORS } from '@/lib/constants';
 
 function groupByMonitor(incidents: AggregatedDayIncident[]): Map<string, AggregatedDayIncident[]> {
   const grouped = new Map<string, AggregatedDayIncident[]>();
@@ -42,22 +42,22 @@ export function CalendarDayModal({ data, open, onOpenChange }: CalendarDayModalP
       <DialogContent className="max-w-md">
         <DialogHeader>
           <div className="flex items-center justify-between">
-            <DialogTitle className="flex items-center gap-2">
+            <DialogTitle className="flex items-center">
               <span
-                className={cn('w-2.5 h-2.5 rounded-full shrink-0', STATUS_DOT_COLORS[data.status])}
+                className={cn('mr-2 w-2.5 h-2.5 rounded-full shrink-0', STATUS_COLORS[data.status])}
               />
               {`Incidents on ${formatUtc(data.date, 'MMM d, yyyy')}`}
             </DialogTitle>
             <DialogClose
               render={
-                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" aria-label="Close">
+                <Button variant="ghost" size="icon-sm" aria-label="Close">
                   <IconX className="h-4 w-4" />
                 </Button>
               }
             />
           </div>
           {data.uptime !== null && (
-            <DialogDescription>{`Overall uptime: ${data.uptime.toFixed(2)}%`}</DialogDescription>
+            <DialogDescription>{`Overall uptime: ${formatPercent(data.uptime, 2)}`}</DialogDescription>
           )}
         </DialogHeader>
 
@@ -68,13 +68,13 @@ export function CalendarDayModal({ data, open, onOpenChange }: CalendarDayModalP
                 {monitorName}
               </div>
               <div className="space-y-2">
-                {incidents.map((incident, i) => (
+                {incidents.map((incident) => (
                   <div
-                    key={`${incident.startTime}-${incident.endTime}-${i}`}
+                    key={`${incident.monitorId}-${incident.startSec}`}
                     className="rounded-md border border-border p-3"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <span className="font-mono text-[11px] text-muted-foreground whitespace-nowrap">
+                      <span className="font-mono text-2xs text-muted-foreground whitespace-nowrap">
                         [{incident.startTime} – {incident.endTime}]
                       </span>
                       <span className="text-sm text-foreground text-right">{incident.error}</span>

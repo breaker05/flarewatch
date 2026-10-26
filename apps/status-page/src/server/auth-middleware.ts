@@ -1,16 +1,10 @@
 import type { RequestServerOptions, RequestServerResult } from '@tanstack/react-start';
+import { jsonError } from '@/lib/admin-http';
 import { verifyBasicAuthHeader } from '@/lib/auth-secret';
 import { resolveRuntimeEnv } from '@/lib/runtime-env';
 import { isSignInConfigured, overSignInLimit, resolveViewer } from '@/lib/operator.server';
 import { getConfig, isPrivateOnly } from '@/lib/config';
 import { cspNonce } from './csp-nonce';
-
-function jsonError(status: number, message: string): Response {
-  return new Response(JSON.stringify({ error: message }), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
 
 /** On a private-only page, what a visitor may still reach. Data server fns check for themselves. */
 function isOpenToVisitors(pathname: string): boolean {
@@ -62,10 +56,12 @@ export async function authMiddlewareServer(
   const response = result instanceof Response ? result : result.response;
   const pathname = opts.pathname.toLowerCase();
   // Only the embed belongs in another site's frame; a framed sign-in or admin page invites clickjacking.
-  response.headers.set(
-    'Content-Security-Policy',
-    contentSecurityPolicy(cspNonce(opts.request), pathname.startsWith('/embed/')),
-  );
+  if (response.headers.get('Content-Type') !== 'image/svg+xml') {
+    response.headers.set(
+      'Content-Security-Policy',
+      contentSecurityPolicy(cspNonce(opts.request), pathname.startsWith('/embed/')),
+    );
+  }
   // What a signed-in person or an admin script sees must never be stored by a shared cache.
   const env = await resolveRuntimeEnv();
   if (pathname.startsWith('/api/admin') || (await resolveViewer(env, opts.request)) !== 'visitor') {
@@ -94,7 +90,7 @@ async function authorize(opts: RequestServerOptions<any, any>): Promise<Middlewa
       isWriteMethod(request.method) &&
       hasInvalidOrigin(request)
     ) {
-      return jsonError(403, 'Invalid origin');
+      return jsonError('Invalid origin', 403);
     }
 
     if (pathname === '/api/admin/session') {
@@ -105,7 +101,7 @@ async function authorize(opts: RequestServerOptions<any, any>): Promise<Middlewa
     // counts for every caller, signed in or not. Once: the Basic branch skips it.
     const countsEveryCall = pathname === '/api/admin/check';
     if (countsEveryCall && (await overSignInLimit(env, request))) {
-      return jsonError(429, 'Too many attempts');
+      return jsonError('Too many attempts', 429);
     }
 
     if ((await resolveViewer(env, request)) === 'operator') {
@@ -118,12 +114,12 @@ async function authorize(opts: RequestServerOptions<any, any>): Promise<Middlewa
     const authorization = request.headers.get('Authorization');
     if (adminCreds && authorization) {
       if (!countsEveryCall && (await overSignInLimit(env, request))) {
-        return jsonError(429, 'Too many attempts');
+        return jsonError('Too many attempts', 429);
       }
       if (await verifyBasicAuthHeader(adminCreds, authorization)) return next();
     }
 
-    return jsonError(401, 'Not authenticated');
+    return jsonError('Not authenticated', 401);
   }
 
   if (
@@ -132,7 +128,7 @@ async function authorize(opts: RequestServerOptions<any, any>): Promise<Middlewa
     (await resolveViewer(env, request)) === 'visitor'
   ) {
     return pathname.startsWith('/api/')
-      ? jsonError(404, 'Not found')
+      ? jsonError('Not found', 404)
       : // Not Response.redirect: its headers are immutable, and the caller adds some.
         new Response(null, {
           status: 302,

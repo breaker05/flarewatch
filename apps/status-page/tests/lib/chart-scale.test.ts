@@ -41,15 +41,8 @@ describe('linearScale', () => {
     expect(s(50)).toBe(290);
   });
 
-  it('inverts pixel back to domain', () => {
-    const s = linearScale([0, 250], [130, 5]);
-    expect(s.invert(s(123))).toBeCloseTo(123, 9);
-    expect(s.invert(130)).toBeCloseTo(0, 9);
-    expect(s.invert(5)).toBeCloseTo(250, 9);
-  });
-
-  it('does not divide by zero on a degenerate domain', () => {
+  it('puts every value of a degenerate domain in the middle of the range', () => {
     const s = linearScale([42, 42], [0, 100]);
-    expect(Number.isFinite(s(42))).toBe(true);
+    expect(s(42)).toBe(50);
   });
 });

@@ -8,36 +8,18 @@ import {
 import type { HeartbeatRun } from '@flarewatch/shared';
 import { HEARTBEAT_RUN_HISTORY } from '@flarewatch/shared';
 import { formatUtcShort } from '@flarewatch/shared';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent } from '@/components/ui/tooltip';
+import { RunCell } from '@/components/ui/status-cell';
 import { formatDuration } from '@/lib/date';
 import { runLatenessSec, type HeartbeatView } from '@/lib/heartbeat';
 import { useContainerWidth } from '@/lib/hooks/use-container-width';
 import { STATUS_BAR } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 
-export const RUN_CELL_CLASSES: Record<HeartbeatRun['outcome'], string> = {
-  ok: 'bg-status-operational',
-  late: 'bg-status-degraded',
-  fail: 'bg-status-down',
-  miss: 'bg-status-down/40 border border-dashed border-status-down',
-};
-
-export const RUNNING_CELL_CLASSES = 'border border-status-maintenance';
-
 const GROUP_FOCUS =
-  'outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]';
-
-const CELL_FEEDBACK = `transition-[scale,filter,box-shadow] duration-150 ease-out hover:scale-y-110 hover:brightness-110 ${GROUP_FOCUS}`;
+  'outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3';
 
 type NextCellKind = 'next' | 'late' | 'missed' | 'first' | 'running';
-
-const NEXT_CELL_CLASSES: Record<NextCellKind, string> = {
-  next: 'bg-status-unknown-bg border-muted-foreground',
-  late: 'bg-status-degraded/40 border-status-degraded-text',
-  missed: 'bg-status-down/40 border-status-down',
-  first: 'bg-status-unknown-bg border-muted-foreground',
-  running: 'bg-status-maintenance/40 border-status-maintenance',
-};
 
 const NEXT_DETAIL: Record<'running' | 'late' | 'missed' | 'next', (time: string) => string> = {
   running: (time) => `Running, must finish by ${time}`,
@@ -54,40 +36,24 @@ interface NextCellProps {
 }
 
 /** Tooltips never open on touch, so a tap opens the cell's detail explicitly. */
-function CellTooltip({
-  detail,
-  ...props
-}: ComponentProps<typeof TooltipTrigger> & { detail: string }) {
+function CellTooltip({ detail, ...props }: ComponentProps<typeof RunCell> & { detail: string }) {
   const [open, setOpen] = useState(false);
   return (
     <Tooltip open={open} onOpenChange={setOpen}>
-      <TooltipTrigger
+      <RunCell
         tabIndex={-1}
         aria-label={detail}
         closeOnClick={false}
         onClick={() => setOpen(true)}
         {...props}
       />
-      <TooltipContent side="top" className="text-xs">
-        {detail}
-      </TooltipContent>
+      <TooltipContent side="top">{detail}</TooltipContent>
     </Tooltip>
   );
 }
 
 function NextCell({ kind, detail, className, ref }: NextCellProps) {
-  return (
-    <CellTooltip
-      ref={ref}
-      detail={detail}
-      className={cn(
-        'h-6 rounded-sm border border-dashed',
-        NEXT_CELL_CLASSES[kind],
-        CELL_FEEDBACK,
-        className,
-      )}
-    />
-  );
+  return <CellTooltip ref={ref} detail={detail} next={kind} className={cn('h-6', className)} />;
 }
 
 function Rule() {
@@ -141,24 +107,24 @@ function StripCells({
 
   return (
     <div
-      className={cn('w-full items-center gap-0.5', isMobile ? 'flex' : 'grid')}
-      onKeyDown={handleKeyDown}
-      style={
+      className={cn(
+        'w-full items-center gap-0.5',
         isMobile
-          ? undefined
-          : { gridTemplateColumns: `repeat(${slots.length}, minmax(0, 1fr)) auto minmax(0, 1fr)` }
-      }
+          ? 'flex'
+          : 'grid grid-cols-[repeat(var(--cells),minmax(0,1fr))_auto_minmax(0,1fr)]',
+      )}
+      onKeyDown={handleKeyDown}
+      style={isMobile ? undefined : { '--cells': slots.length }}
     >
       <div
         ref={groupRef}
         role="group"
         tabIndex={0}
         aria-label={summary}
-        style={isMobile ? undefined : { gridColumn: `span ${slots.length}` }}
         className={cn(
           'min-w-0 items-center gap-0.5 overflow-hidden rounded',
           GROUP_FOCUS,
-          isMobile ? 'flex flex-1' : 'grid grid-cols-subgrid',
+          isMobile ? 'flex flex-1' : 'grid grid-cols-subgrid col-[span_var(--cells)]',
         )}
       >
         {slots.map((slot, position) => {
@@ -179,20 +145,8 @@ function StripCells({
               ref={(el) => {
                 cellRefs.current[position] = el;
               }}
-              style={
-                slot.kind === 'running'
-                  ? {
-                      background:
-                        'linear-gradient(to top, var(--status-maintenance) 45%, var(--status-maintenance-bg) 45%)',
-                    }
-                  : undefined
-              }
-              className={cn(
-                'h-6 rounded-sm',
-                sizing,
-                slot.kind === 'run' ? RUN_CELL_CLASSES[slot.run.outcome] : RUNNING_CELL_CLASSES,
-                CELL_FEEDBACK,
-              )}
+              run={slot.kind === 'run' ? slot.run.outcome : 'running'}
+              className={cn('h-6', sizing)}
             />
           );
         })}
@@ -208,6 +162,49 @@ function StripCells({
       />
     </div>
   );
+}
+
+function runDetail(
+  run: HeartbeatRun,
+  index: number,
+  runs: HeartbeatRun[],
+  periodSeconds: number | undefined,
+  graceSeconds: number | undefined,
+): string {
+  const time = formatUtcShort(run.at);
+  if (run.outcome === 'late') {
+    const lateBySec = runLatenessSec(runs, index, periodSeconds, graceSeconds);
+    if (lateBySec > 0) {
+      return `Received ${formatDuration(lateBySec * 1000)} late`;
+    }
+    return `Completed late at ${time}`;
+  }
+  if (run.outcome === 'fail') return `Failed at ${time}`;
+  if (run.outcome === 'miss') return `Missed, expected ${time}`;
+  return `Completed at ${time}`;
+}
+
+function nextCell(heartbeat: HeartbeatView) {
+  const nextKind: NextCellKind =
+    heartbeat.phase === 'pending'
+      ? 'first'
+      : heartbeat.phase === 'running'
+        ? 'running'
+        : heartbeat.phase === 'late'
+          ? 'late'
+          : heartbeat.phase === 'down' && heartbeat.lastResult !== 'fail'
+            ? 'missed'
+            : 'next';
+
+  const nextTimeSec = heartbeat.nextDueSec ?? heartbeat.deadlineSec;
+  const nextDetail =
+    nextKind === 'first'
+      ? 'Waiting for the first ping'
+      : nextTimeSec === undefined
+        ? 'Next run not scheduled yet'
+        : NEXT_DETAIL[nextKind](formatUtcShort(nextTimeSec));
+
+  return { nextKind, nextDetail };
 }
 
 export function RunStrip({
@@ -236,38 +233,7 @@ export function RunStrip({
         ? runningDetail
         : 'No run recorded yet. The first ping starts the schedule.';
 
-  function runDetail(run: HeartbeatRun, index: number): string {
-    const time = formatUtcShort(run.at);
-    if (run.outcome === 'late') {
-      const lateBySec = runLatenessSec(runs, index, periodSeconds, graceSeconds);
-      if (lateBySec > 0) {
-        return `Received ${formatDuration(lateBySec * 1000)} late`;
-      }
-      return `Completed late at ${time}`;
-    }
-    if (run.outcome === 'fail') return `Failed at ${time}`;
-    if (run.outcome === 'miss') return `Missed, expected ${time}`;
-    return `Completed at ${time}`;
-  }
-
-  const nextKind: NextCellKind =
-    heartbeat.phase === 'pending'
-      ? 'first'
-      : heartbeat.phase === 'running'
-        ? 'running'
-        : heartbeat.phase === 'late'
-          ? 'late'
-          : heartbeat.phase === 'down' && heartbeat.lastResult !== 'fail'
-            ? 'missed'
-            : 'next';
-
-  const nextTimeSec = heartbeat.nextDueSec ?? heartbeat.deadlineSec;
-  const nextDetail =
-    nextKind === 'first'
-      ? 'Waiting for the first ping'
-      : nextTimeSec === undefined
-        ? 'Next run not scheduled yet'
-        : NEXT_DETAIL[nextKind](formatUtcShort(nextTimeSec));
+  const { nextKind, nextDetail } = nextCell(heartbeat);
 
   const filled: Slot[] = runs.map((run, index) => ({ kind: 'run', run, index }));
   if (running) filled.push({ kind: 'running' });
@@ -281,7 +247,14 @@ export function RunStrip({
     ? Math.min(Math.floor(width / STATUS_BAR.MOBILE_BAR_WIDTH), slots.length)
     : 0;
 
-  const cells = { nextKind, nextDetail, summary, runDetail, runningDetail };
+  const cells = {
+    nextKind,
+    nextDetail,
+    summary,
+    runningDetail,
+    runDetail: (run: HeartbeatRun, index: number) =>
+      runDetail(run, index, runs, periodSeconds, graceSeconds),
+  };
 
   return (
     <>

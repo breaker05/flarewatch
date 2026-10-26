@@ -1,7 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   parseHeartbeatSignal,
-  type HeartbeatMonitor,
   type HeartbeatRun,
   type HeartbeatSignal,
   type Monitor,
@@ -13,19 +12,15 @@ import { deriveHeartbeatToken } from '../src/ping';
 import { createHub, hubNamespace } from './helpers/hub';
 import type { PingKind } from '../src/hub/heartbeat';
 import { createWorkerDeps } from './helpers/worker-deps';
+import { createHeartbeat } from '@flarewatch/shared/testing/monitors';
+import { freezeClock } from '@flarewatch/shared/testing/clock';
 
 const workerConfigMock: WorkerConfig = { monitors: [] };
 
 const NOW = Date.parse('2025-01-15T12:00:00Z') / 1000;
 const SECRET = 'test-heartbeat-secret';
 
-const heartbeat: HeartbeatMonitor = {
-  id: 'backup',
-  name: 'Nightly backup',
-  method: 'HEARTBEAT',
-  periodSeconds: 3600,
-  graceSeconds: 60,
-};
+const heartbeat = createHeartbeat();
 const pullMonitor: Monitor = {
   id: 'api',
   name: 'API',
@@ -89,23 +84,20 @@ describe('heartbeat tokens', () => {
     const first = await token();
     const second = await token();
 
+    expect(first).toBe('ilj38AekxPUwhSJtEYcJqRW76MVAbiY9');
     expect(first).toBe(second);
     expect(first).toHaveLength(32);
     expect(first).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(await token('other-job')).not.toBe(first);
+    expect(await deriveHeartbeatToken('rotated-heartbeat-secret', heartbeat.id)).not.toBe(first);
   });
 });
 
 describe('ping routes', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(NOW * 1000));
+    freezeClock(new Date(NOW * 1000));
     workerConfigMock.monitors = [heartbeat, pullMonitor];
     hub = createHub().hub;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   it.each(['GET', 'POST', 'HEAD'])('records a success ping via %s', async (method) => {
@@ -423,14 +415,9 @@ describe('ping routes', () => {
 
 describe('ping to scheduled check end to end', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(NOW * 1000));
+    freezeClock(new Date(NOW * 1000));
     workerConfigMock.monitors = [heartbeat];
     hub = createHub().hub;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   it('marks the monitor up after a ping inside the period', async () => {

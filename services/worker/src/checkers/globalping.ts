@@ -10,7 +10,6 @@ import {
   validateHttpResponse,
   parseTcpTarget,
   DEFAULT_HTTP_TIMEOUT,
-  DEFAULT_SSL_EXPIRY_THRESHOLD_DAYS,
   createLogger,
   getErrorMessage,
   readJsonUpTo,
@@ -29,7 +28,7 @@ export const PREPAID_REQUESTS = 2;
 interface GlobalPingConfig {
   token: string;
   magic?: string;
-  ipVersion?: number;
+  ipVersion: number;
 }
 
 const measurementResultSchema = z.object({
@@ -150,18 +149,21 @@ async function validateHttpResult(
 
     if (tls.certificate?.expiresAt) {
       const { expiryDate, daysUntilExpiry } = calculateCertExpiry(tls.certificate.expiresAt);
-      ssl = { expiryDate, daysUntilExpiry };
-      if (tls.certificate.issuer?.commonName) {
-        ssl.issuer = tls.certificate.issuer.commonName;
-      }
-      if (tls.certificate.subject?.commonName) {
-        ssl.subject = tls.certificate.subject.commonName;
-      }
+      if (!Number.isFinite(expiryDate)) {
+        if (!error && target.sslCheckEnabled) error = 'Invalid certificate expiry date';
+      } else {
+        ssl = { expiryDate, daysUntilExpiry };
+        if (tls.certificate.issuer?.commonName) {
+          ssl.issuer = tls.certificate.issuer.commonName;
+        }
+        if (tls.certificate.subject?.commonName) {
+          ssl.subject = tls.certificate.subject.commonName;
+        }
 
-      if (!error && target.sslCheckEnabled) {
-        const threshold = target.sslCheckDaysBeforeExpiry ?? DEFAULT_SSL_EXPIRY_THRESHOLD_DAYS;
-        if (daysUntilExpiry <= threshold) {
-          error = `Certificate expires in ${daysUntilExpiry} days (threshold: ${threshold})`;
+        if (!error && target.sslCheckEnabled) {
+          if (expiryDate <= Math.floor(Date.now() / 1000)) {
+            error = 'Certificate has expired';
+          }
         }
       }
     }
@@ -191,7 +193,7 @@ async function createMeasurement(
   if (response.status !== 202) {
     const errorBody = z
       .object({ error: z.optional(z.object({ message: z.string() })) })
-      .safeParse(await readJsonUpTo(response, MAX_BODY_BYTES));
+      .safeParse(await readJsonUpTo(response, MAX_BODY_BYTES).catch(() => undefined));
     throw new Error(
       (errorBody.success ? errorBody.data.error?.message : undefined) ??
         `API error: ${response.status}`,
@@ -222,6 +224,7 @@ async function pollMeasurement(
     const response = await fetcher(`${GLOBALPING_API}/${measurementId}`, {
       timeout: API_TIMEOUT,
     });
+    if (!response.ok) throw new Error(`API error: ${response.status}`);
     const parsed = measurementResultSchema.safeParse(await readJsonUpTo(response, MAX_BODY_BYTES));
     if (!parsed.success) {
       throw new Error('invalid measurement payload');
@@ -294,7 +297,7 @@ export class GlobalPingChecker {
         budget.subrequests -= 1;
       }
       const timeout = Math.min(options.timeout ?? API_TIMEOUT, remaining);
-      return this.fetcher(input, { ...options, timeout });
+      return this.fetcher(input, { ...options, timeout, redirect: 'manual' });
     };
     try {
       const config = parseProxyUrl(url);

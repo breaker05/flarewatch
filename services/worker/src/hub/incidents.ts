@@ -7,7 +7,7 @@ import {
   type AlertRow,
   type IncidentAlert,
 } from './alerts';
-import { parseJson, type Sql } from './sql';
+import { parseJson, ROW_BYTES, type Sql } from './sql';
 
 /** A failure this soon after recovering reopens the incident, so a flapping target adds no rows. */
 const FLAP_SECONDS = 15 * 60;
@@ -19,19 +19,13 @@ const MAX_HISTORY_CHARS = 1_000_000;
 const MAX_INCIDENT_SEGMENTS = 100;
 /** With the segment cap, bounds how many list parts a monitor's history can fill. */
 const MAX_ERROR_CHARS = 500;
-/**
- * JSON characters per list part. A capped history fits one part. A UTF-16 unit
- * takes at most 3 bytes in UTF-8, so a part stays under 6 MB: an 8 MB value
- * stored in production on 2026-10-02 and a 10 MB one failed, whatever the
- * Durable Objects docs say about 2 MB.
- */
-const PART_CHARS = 2_000_000;
+const encoder = new TextEncoder();
+const utf8Bytes = (text: string) => encoder.encode(text).byteLength;
 /** Rows importHistory reads per query, and ids per delete: a query binds at most 100 values. */
 const IMPORT_PAGE = 100;
 
 export interface IncidentUpdate {
   monitorId: string;
-  statusChanged: boolean;
   changeType: 'none' | 'up' | 'down' | 'error';
   isUp: boolean;
   incidentStartTime: number;
@@ -44,6 +38,8 @@ export interface OpenIncident {
   incident: Incident;
   alert: IncidentAlert;
   reopenedAt: number | null;
+  /** When the monitor last failed again while waiting to close, since the incident last opened. */
+  relapsedAt: number | null;
   /** When a reopened incident's monitor last came back up, while it waits to close. */
   upSince: number | null;
 }
@@ -55,6 +51,7 @@ type IncidentRow = {
   errors: string;
   end_at: number | null;
   reopened_at: number | null;
+  relapsed_at: number | null;
   up_since: number | null;
 };
 
@@ -75,7 +72,7 @@ export class Incidents {
     return new Map(
       this.sql
         .exec<IncidentRow & AlertRow>(
-          `SELECT id, monitor_id, starts, errors, end_at, reopened_at, up_since, ${ALERT_COLUMNS}
+          `SELECT id, monitor_id, starts, errors, end_at, reopened_at, relapsed_at, up_since, ${ALERT_COLUMNS}
            FROM incidents WHERE end_at IS NULL`,
         )
         .map((row) => [
@@ -86,6 +83,7 @@ export class Incidents {
             incident: toIncident(row),
             alert: readAlert(row),
             reopenedAt: row.reopened_at,
+            relapsedAt: row.relapsed_at,
             upSince: row.up_since,
           },
         ]),
@@ -117,20 +115,24 @@ export class Incidents {
     result: CheckResult,
     open: OpenIncident | undefined,
     now: number,
+    firstFailure: number,
   ): IncidentUpdate {
     const incidentStartTime = open?.incident.start[0] ?? now;
 
     if (result.ok) {
-      const up = (statusChanged: boolean): IncidentUpdate => ({
+      const up = (changed: boolean): IncidentUpdate => ({
         monitorId,
-        statusChanged,
-        changeType: statusChanged ? 'up' : 'none',
+        changeType: changed ? 'up' : 'none',
         isUp: true,
         incidentStartTime,
         error: '',
       });
       if (!open) return up(false);
-      if (open.reopenedAt === null) {
+      const legacyCertificate =
+        /^(?:SSL certificate|Certificate) expires in \d+ days \(threshold: \d+\)$/.test(
+          open.incident.error[open.incident.error.length - 1] ?? '',
+        );
+      if (open.reopenedAt === null || legacyCertificate) {
         this.close(open, now);
         return up(true);
       }
@@ -158,16 +160,15 @@ export class Incidents {
       this.sql.exec(
         'INSERT INTO incidents (monitor_id, starts, errors) VALUES (?, ?, ?)',
         monitorId,
-        JSON.stringify([now]),
+        JSON.stringify([firstFailure]),
         JSON.stringify([error]),
       );
-      this.setNewest(monitorId, { start: [now], error: [error] }, false);
+      this.setNewest(monitorId, { start: [firstFailure], error: [error] }, false);
       return {
         monitorId,
-        statusChanged: true,
         changeType: 'down',
         isUp: false,
-        incidentStartTime: now,
+        incidentStartTime: firstFailure,
         error,
       };
     }
@@ -178,7 +179,7 @@ export class Incidents {
     if (segments) {
       this.sql.exec(
         `UPDATE incidents SET starts = ?, errors = ?, up_since = NULL,
-           reopened_at = CASE WHEN up_since IS NULL THEN reopened_at ELSE ? END
+           relapsed_at = CASE WHEN up_since IS NULL THEN relapsed_at ELSE ? END
          WHERE id = ?`,
         JSON.stringify(segments.start),
         JSON.stringify(segments.error),
@@ -188,14 +189,13 @@ export class Incidents {
       this.setNewest(monitorId, segments, true);
     } else if (open.upSince !== null) {
       this.sql.exec(
-        'UPDATE incidents SET up_since = NULL, reopened_at = ? WHERE id = ?',
+        'UPDATE incidents SET up_since = NULL, relapsed_at = ? WHERE id = ?',
         now,
         open.id,
       );
     }
     return {
       monitorId,
-      statusChanged: segments !== null,
       changeType: segments ? 'error' : 'none',
       isUp: false,
       incidentStartTime,
@@ -273,20 +273,43 @@ export class Incidents {
       this.sql.exec(`DELETE FROM incidents WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
     }
     for (const [monitorId, { list }] of histories) {
-      const parts: string[][] = [];
-      let size = 0;
-      for (const { json } of list) {
-        const current = parts[parts.length - 1];
-        if (current && size + json.length + 1 <= PART_CHARS) {
-          current.push(json);
-          size += json.length + 1;
-        } else {
-          parts.push([json]);
-          size = json.length + 2;
-        }
-      }
-      parts.forEach((part, index) => this.writePart(monitorId, index, `[${part.join(',')}]`));
+      this.writeParts(
+        monitorId,
+        list.map(({ json }) => json),
+      );
     }
+  }
+
+  /** Splits again each history with a part over ROW_BYTES: releases before 3.4.1 sized parts in characters. */
+  splitOversized(): void {
+    for (const { monitor_id } of this.sql.exec<{ monitor_id: string }>(
+      'SELECT DISTINCT monitor_id FROM incident_lists WHERE LENGTH(CAST(data AS BLOB)) > ?',
+      ROW_BYTES,
+    )) {
+      const list = this.readList(monitor_id);
+      this.sql.exec('DELETE FROM incident_lists WHERE monitor_id = ?', monitor_id);
+      this.writeParts(
+        monitor_id,
+        list.map((incident) => JSON.stringify(incident)),
+      );
+    }
+  }
+
+  private writeParts(monitorId: string, incidents: string[]): void {
+    const parts: string[][] = [];
+    let size = 0;
+    for (const json of incidents) {
+      const current = parts[parts.length - 1];
+      const bytes = utf8Bytes(json);
+      if (current && size + bytes + 1 <= ROW_BYTES) {
+        current.push(json);
+        size += bytes + 1;
+      } else {
+        parts.push([json]);
+        size = bytes + 2;
+      }
+    }
+    parts.forEach((part, index) => this.writePart(monitorId, index, `[${part.join(',')}]`));
   }
 
   /** The grace period before a down alert restarts at the reopen. */
@@ -295,7 +318,7 @@ export class Incidents {
     const incident = { start, error: errors };
     const reopened = addSegment(incident, error, now) ?? incident;
     this.sql.exec(
-      `UPDATE incidents SET end_at = NULL, reopened_at = ?, starts = ?, errors = ?,
+      `UPDATE incidents SET end_at = NULL, reopened_at = ?, relapsed_at = NULL, starts = ?, errors = ?,
          ${REOPEN_ALERT_RESET}
        WHERE id = ?`,
       now,
@@ -306,7 +329,6 @@ export class Incidents {
     this.setNewest(monitorId, reopened, true);
     return {
       monitorId,
-      statusChanged: true,
       changeType: 'down',
       isUp: false,
       incidentStartTime: incident.start[0] ?? now,
@@ -324,7 +346,7 @@ export class Incidents {
     const list = last ? parseList(last.data) : [];
     if (replace) list.pop();
     const data = JSON.stringify([...list, incident]);
-    if (data.length <= PART_CHARS) {
+    if (utf8Bytes(data) <= ROW_BYTES) {
       this.writePart(monitorId, part, data);
     } else {
       this.writePart(monitorId, part, JSON.stringify(list));
@@ -334,12 +356,7 @@ export class Incidents {
 
   /** Deletes the oldest closed incidents past the caps. Earliest end is oldest, so the end_at index finds them. */
   private capClosed(monitorId: string): void {
-    const list = this.sql
-      .exec<{ data: string }>(
-        'SELECT data FROM incident_lists WHERE monitor_id = ? ORDER BY part',
-        monitorId,
-      )
-      .flatMap(({ data }) => parseList(data));
+    const list = this.readList(monitorId);
     const sizes = list.map((incident) => JSON.stringify(incident).length + 1);
     let closed = list.filter(({ end }) => end !== undefined).length;
     let size = sizes.reduce((total, n) => total + n, 0);
@@ -383,6 +400,15 @@ export class Incidents {
     }
   }
 
+  private readList(monitorId: string): Incident[] {
+    return this.sql
+      .exec<{ data: string }>(
+        'SELECT data FROM incident_lists WHERE monitor_id = ? ORDER BY part',
+        monitorId,
+      )
+      .flatMap(({ data }) => parseList(data));
+  }
+
   private writePart(monitorId: string, part: number, data: string): void {
     this.sql.exec(
       `INSERT INTO incident_lists (monitor_id, part, data) VALUES (?, ?, ?)
@@ -394,21 +420,24 @@ export class Incidents {
   }
 }
 
-/** Errors cut as new ones are: a release before 3.2.0 stored them whole. */
+/** Errors and segments cut as new ones are: a release before 3.2.0 stored them whole. */
 function toIncident(row: Pick<IncidentRow, 'starts' | 'errors' | 'end_at'>): Incident {
   return {
-    start: startsSchema.safeParse(parseJson(row.starts)).data ?? [],
-    error: (errorsSchema.safeParse(parseJson(row.errors)).data ?? []).map((error) =>
-      error.slice(0, MAX_ERROR_CHARS),
+    start: capSegments(startsSchema.safeParse(parseJson(row.starts)).data ?? []),
+    error: capSegments(
+      (errorsSchema.safeParse(parseJson(row.errors)).data ?? []).map((error) =>
+        error.slice(0, MAX_ERROR_CHARS),
+      ),
     ),
     ...(row.end_at !== null && { end: row.end_at }),
   };
 }
 
+/** Segments cut too: 3.2.0 copied legacy incidents into the lists whole. */
 function parseList(data: string): Incident[] {
   return (listSchema.safeParse(parseJson(data)).data ?? []).map(({ start, error, end }) => ({
-    start,
-    error,
+    start: capSegments(start),
+    error: capSegments(error),
     ...(end !== undefined && { end }),
   }));
 }

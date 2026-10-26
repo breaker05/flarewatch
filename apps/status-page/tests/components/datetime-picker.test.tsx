@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vite-plus/test';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 
 import { DateTimePicker } from '@/components/ui/datetime-picker';
 
@@ -13,10 +13,9 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  process.env.TZ = originalTimeZone;
+  if (originalTimeZone === undefined) delete process.env.TZ;
+  else process.env.TZ = originalTimeZone;
 });
-
-afterEach(cleanup);
 
 describe('DateTimePicker', () => {
   const value = new Date('2026-06-10T02:00:00Z');

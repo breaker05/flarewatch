@@ -4,10 +4,10 @@ FlareWatch uses Vite+ (`vp`) for installs, checks, tests and builds.
 
 ```bash
 vp install
-vp config          # once, for the pre-commit hook
 
 vp check           # format, lint and types
 vp run test        # unit tests
+vp run --filter status-page doctor  # React Doctor: fails on any finding
 vp run build       # both Workers
 ```
 
@@ -29,13 +29,14 @@ The last two tests each hold a short table of the cases where FlareWatch and the
 
 ## Layout
 
-| Path                | Holds                                                         |
-| ------------------- | ------------------------------------------------------------- |
-| `services/worker`   | The monitor Worker: checks, the hub, alerts, heartbeat pings. |
-| `apps/status-page`  | The status page Worker, a TanStack Start app.                 |
-| `packages/config`   | The user's config: monitors, alerts, page settings.           |
-| `packages/shared`   | Types and helpers both Workers use.                           |
-| `.github/workflows` | CI and the deploy workflow.                                   |
+| Path                     | Holds                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `services/worker`        | The monitor Worker: checks, the hub, alerts, heartbeat pings.                                          |
+| `apps/status-page`       | The status page Worker, a TanStack Start app.                                                          |
+| `packages/config`        | The user's config: monitors, alerts, page settings.                                                    |
+| `packages/shared`        | Types and helpers both Workers use. Tests import its test helpers from `@flarewatch/shared/testing/*`. |
+| `packages/vitest-config` | The Vitest options and setup file every package's tests use.                                           |
+| `.github/workflows`      | CI and the deploy workflow.                                                                            |
 
 The monitor Worker keeps incidents, latency, heartbeat pings and maintenance windows in the hub, a SQLite Durable Object in `services/worker/src/hub`. The status page reads and edits it through its `MONITOR_WORKER` service binding. KV (`FLAREWATCH_STATE`) holds sign-in sessions.
 
@@ -54,6 +55,8 @@ Open <http://localhost:3000>. The first page load starts a check run, and data s
 ## Lint rules
 
 Linting includes the anti-slop rules in `tools/oxlint/anti-slop/`, from [dmmulroy/anti-slop](https://github.com/dmmulroy/anti-slop) plus a few local ones. They live with their tests in another repository, so don't edit the copy here. If a rule misfires, open an issue. `vite.config.ts` lists the rules that run.
+
+`@shadcn/lint` checks how pages use the components in `apps/status-page/src/components/ui`. Each of its rules is an error. When a page needs a style a component doesn't offer, add a variant to the component instead of passing the class through `className`. Every rule also runs inside `components/ui`, with two exceptions that `vite.config.ts` lists by file name. A few composites, such as the calendar, skip `no-restyle` because they build on other primitives. Three files skip `require-static-classes` because they pass on their own `cva()` output, which the rule can't read. A new file gets every rule, so an odd value goes into `styles.css` as a theme token.
 
 Oxlint's type-aware `no-unsafe-*`, `no-floating-promises` and `no-misused-promises` checks run as errors, tests included. Fix findings by restructuring first. A type assertion that survives review needs a `SAFETY:` comment stating the checked invariant.
 

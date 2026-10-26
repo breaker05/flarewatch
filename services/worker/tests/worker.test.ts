@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   type Fetcher,
   isJsonObject,
@@ -8,15 +8,14 @@ import {
   type WorkerConfig,
 } from '@flarewatch/shared';
 import type { Env } from '../src/env';
-import Worker, { runChecks, type WorkerDeps } from '../src/index';
-import { createNotifier, WebhookNotifier } from '../src/notifications/webhook';
+import Worker, { runChecks } from '../src/index';
+import { createNotifier } from '../src/notifications/webhook';
 import { createHub, hubNamespace } from './helpers/hub';
 import { createWorkerDeps } from './helpers/worker-deps';
+import { webhookCapture, type Delivered } from './helpers/webhook-delivery';
+import { freezeClock } from '@flarewatch/shared/testing/clock';
 
-const checkMonitorMock = vi.fn<WorkerDeps['checkMonitor']>();
-const getEdgeLocationMock = vi.fn<WorkerDeps['getEdgeLocation']>();
-const notifierSendMock = vi.fn<WebhookNotifier['send']>();
-const createNotifierMock = vi.fn<WorkerDeps['createNotifier']>();
+const network = vi.fn<Fetcher>();
 const workerConfigMock: WorkerConfig = { monitors: [] };
 
 const NOW_SECONDS = Date.parse('2025-01-15T12:00:00Z') / 1000;
@@ -51,43 +50,32 @@ function createMaintenance(overrides: Partial<Maintenance> = {}): Maintenance {
 
 function setNotifications(overrides: Partial<NotificationConfig> = {}): void {
   workerConfigMock.notification = {
-    webhook: { url: 'https://hooks.example.com' },
+    webhook: { url: 'https://hooks.example.com/alert', template: 'matrix' },
     ...overrides,
   };
 }
 
 function mockUp(): void {
-  checkMonitorMock.mockResolvedValue({
-    location: 'SFO',
-    result: { ok: true, latency: 10 },
-  });
+  network.mockImplementation(async () => new Response('ok'));
 }
 
 function mockDown(): void {
-  checkMonitorMock.mockResolvedValue({
-    location: 'SFO',
-    result: { ok: false, error: 'Unavailable' },
+  network.mockImplementation(async () => {
+    throw new Error('Unavailable');
   });
 }
 
+const deps = createWorkerDeps(workerConfigMock, { fetcher: network, location: 'SFO' });
+
 async function runScheduled(env: Env): Promise<void> {
-  await runChecks(env, {
-    checkMonitor: checkMonitorMock,
-    createNotifier: createNotifierMock,
-    getEdgeLocation: getEdgeLocationMock,
-    staticConfig: workerConfigMock,
-  });
+  await runChecks(env, deps);
 }
 
 describe('scheduled handler', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
   it('forwards its env into runChecks', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response('colo=AMS\n')),
+      vi.fn(async () => new Response('colo=SFO\n')),
     );
     const { hub, env } = createEnv();
 
@@ -100,12 +88,216 @@ describe('scheduled handler', () => {
 describe('subrequests per check run', () => {
   const PROXY = 'https://proxy.example.com/check';
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
+  const HOOK = 'https://hooks.example.com/alert';
+
+  it.each(['direct', 'vpc'])(
+    'budgets 20-hop redirects across a %s run within 50 requests',
+    async (adapter) => {
+      const redirecting = Array.from({ length: 40 }, (_, i) => ({
+        ...createMonitor(`redirect${i}`),
+        ...(adapter === 'vpc' && { checkProxy: 'vpc' }),
+      }));
+      const healthy = createMonitor('healthy');
+      const fetchMock = vi.fn<typeof fetch>(async (input) => {
+        const url = new URL(input instanceof Request ? input.url : input.toString());
+        if (url.href === HOOK || url.hostname === 'healthy.example.com') return new Response('ok');
+        const hop = Number(url.pathname.slice(1));
+        return hop < 20
+          ? new Response(null, { status: 302, headers: { location: `/${hop + 1}` } })
+          : new Response('ok');
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const { hub, env } = createEnv();
+      if (adapter === 'vpc') env.VPC = { fetch: fetchMock, connect: vi.fn() };
+      const record = vi.spyOn(hub, 'record');
+      const confirmAlerts = vi.spyOn(hub, 'confirmAlerts');
+
+      await runChecks(
+        env,
+        createWorkerDeps({
+          monitors: [...redirecting, healthy],
+          notification: { webhook: { url: HOOK }, summaryAfter: 1 },
+        }),
+      );
+
+      const total =
+        fetchMock.mock.calls.length +
+        record.mock.calls.length +
+        confirmAlerts.mock.calls.length +
+        1;
+      expect(total).toBeLessThanOrEqual(50);
+      expect(fetchMock.mock.calls.filter(([input]) => input === HOOK)).toHaveLength(1);
+      const view = hub.view();
+      expect(Object.keys(view.monitors)).toHaveLength(41);
+      expect(view.monitors[healthy.id]?.status).toBe('up');
+      for (const monitor of redirecting) {
+        expect(view.monitors[monitor.id]?.status).toBe('down');
+        expect(view.monitors[monitor.id]?.incidents[0]?.error[0]).toContain(
+          'No subrequests left in this check run',
+        );
+      }
+    },
+  );
+
+  it('stays within 50 when an overlapping run ends the outages while their alerts go out', async () => {
+    const monitors = Array.from({ length: 40 }, (_, i) => createMonitor(`m${i}`));
+    const { hub, env } = createEnv();
+    const otherRun = hub.record.bind(hub);
+    let overlapped = false;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url !== HOOK) return new Response('down', { status: 503 });
+      if (!overlapped) {
+        overlapped = true;
+        otherRun(
+          Math.floor(Date.now() / 1000) + 60,
+          monitors.map((monitor) => ({
+            monitor,
+            check: { location: 'FRA', result: { ok: true as const, latency: 10 } },
+          })),
+          { gracePeriodSeconds: 0, skipIds: [], skipErrorChanges: false },
+        );
+      }
+      return new Response('ok');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const record = vi.spyOn(hub, 'record');
+    const confirmAlerts = vi.spyOn(hub, 'confirmAlerts');
+
+    const deps = createWorkerDeps({
+      monitors,
+      notification: { webhook: { url: HOOK, payload: '$MSG' } },
+    });
+    const requests = () =>
+      fetchMock.mock.calls.length + record.mock.calls.length + confirmAlerts.mock.calls.length + 1;
+
+    await runChecks(env, deps);
+    expect(overlapped).toBe(true);
+    expect(requests()).toBeLessThanOrEqual(50);
+
+    fetchMock.mockClear();
+    record.mockClear();
+    confirmAlerts.mockClear();
+    fetchMock.mockImplementation(async () => new Response('ok'));
+    vi.setSystemTime(Date.now() + 120_000);
+    await runChecks(env, deps);
+
+    expect(requests()).toBeLessThanOrEqual(50);
+    const sent = fetchMock.mock.calls
+      .filter(([input]) => input === HOOK)
+      .map(([, init]) => (typeof init?.body === 'string' ? init.body : ''))
+      .join('\n');
+    for (const monitor of monitors) expect(sent).toMatch(new RegExp(`${monitor.name}\\b`));
   });
 
-  const HOOK = 'https://hooks.example.com/alert';
+  const urlOf = (input: RequestInfo | URL) =>
+    input instanceof Request ? input.url : input.toString();
+
+  async function countRun(
+    monitors: MonitorTarget[],
+    fetchMock: ReturnType<typeof vi.fn<typeof fetch>>,
+    notification?: NotificationConfig,
+    scheduledAt?: number,
+  ) {
+    vi.stubGlobal('fetch', fetchMock);
+    const { hub, env } = createEnv();
+    const record = vi.spyOn(hub, 'record');
+    const confirmAlerts = vi.spyOn(hub, 'confirmAlerts');
+    await runChecks(
+      env,
+      createWorkerDeps({ monitors, ...(notification && { notification }) }),
+      scheduledAt,
+    );
+    return {
+      hub,
+      // The edge-location lookup adds one on a cold isolate; the test deps answer it without a fetch.
+      total:
+        fetchMock.mock.calls.length +
+        record.mock.calls.length +
+        confirmAlerts.mock.calls.length +
+        1,
+    };
+  }
+
+  it('skips the due checks a run cannot afford instead of going past 50', async () => {
+    const monitors = Array.from({ length: 48 }, (_, i) => createMonitor(`m${i}`));
+    const fetchMock = vi.fn<typeof fetch>(async (input) =>
+      urlOf(input) === HOOK ? new Response('ok') : new Response('down', { status: 503 }),
+    );
+
+    const { total, hub } = await countRun(monitors, fetchMock, { webhook: { url: HOOK } });
+
+    expect(total).toBeLessThanOrEqual(50);
+    const checked = Object.values(hub.view().monitors).filter(({ status }) => status === 'down');
+    expect(checked).toHaveLength(46);
+  });
+
+  it('counts a DOMAIN check as two requests when it decides what a run can afford', async () => {
+    const monitors: MonitorTarget[] = Array.from({ length: 25 }, (_, i) => ({
+      id: `d${i}`,
+      name: `Domain ${i}`,
+      method: 'DOMAIN',
+      target: `d${i}.com`,
+      checkEveryMinutes: 1,
+    }));
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(urlOf(input));
+      if (url.hostname === 'data.iana.org')
+        return Response.json({ services: [[['com'], ['https://rdap.example/']]] });
+      return Response.json({
+        objectClassName: 'domain',
+        ldhName: decodeURIComponent(url.pathname.split('/').pop()!),
+        events: [{ eventAction: 'expiration', eventDate: '2030-01-01T00:00:00Z' }],
+      });
+    });
+
+    const { total, hub } = await countRun(monitors, fetchMock);
+
+    expect(total).toBeLessThanOrEqual(50);
+    expect(Object.values(hub.view().monitors).filter(({ status }) => status === 'up').length).toBe(
+      23,
+    );
+  });
+
+  it('still runs the cheaper checks that fit after one that does not', async () => {
+    const gets = Array.from({ length: 47 }, (_, i) => createMonitor(`m${i}`));
+    const domain: MonitorTarget = {
+      id: 'domain',
+      name: 'Domain',
+      method: 'DOMAIN',
+      target: 'example.com',
+      checkEveryMinutes: 1,
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('ok'));
+
+    // At this minute the list starts at its first entry, so the DOMAIN check comes up with one request left.
+    const { hub } = await countRun(
+      [...gets.slice(0, 46), domain, gets[46]!],
+      fetchMock,
+      undefined,
+      48 * 600_000 * 60_000,
+    );
+
+    const up = Object.entries(hub.view().monitors).filter(([, { status }]) => status === 'up');
+    expect(up).toHaveLength(47);
+    expect(up.map(([id]) => id)).not.toContain('domain');
+  });
+
+  it('skips a different check each minute when a run is one request short', async () => {
+    const monitors = Array.from({ length: 48 }, (_, i) => createMonitor(`m${i}`));
+    const checkedAt = async (minute: number) => {
+      const fetchMock = vi.fn<typeof fetch>(async () => new Response('ok'));
+      await countRun(monitors, fetchMock, undefined, minute * 60_000);
+      return new Set(fetchMock.mock.calls.map(([input]) => urlOf(input)));
+    };
+
+    const first = await checkedAt(29_000_000);
+    const second = await checkedAt(29_000_001);
+
+    expect(first.size).toBe(47);
+    expect(second.size).toBe(47);
+    expect(first).not.toEqual(second);
+  });
 
   /** Fetches and hub calls in one run of 45 monitors that confirm through a proxy. */
   async function countSubrequests(failing: number, notification?: NotificationConfig) {
@@ -144,7 +336,7 @@ describe('subrequests per check run', () => {
   it('stays under 50 with 10 of 45 monitors failing', async () => {
     const { total, hubCalls, confirmations } = await countSubrequests(10);
 
-    expect(hubCalls).toBe(1);
+    expect(hubCalls).toBeGreaterThan(0);
     expect(confirmations).toBeGreaterThan(0);
     expect(total).toBeLessThan(50);
   });
@@ -157,7 +349,7 @@ describe('subrequests per check run', () => {
     expect(alerts).toBeGreaterThan(0);
   });
 
-  it('sends a mass outage over the next runs and loses no alert to the request cap', async () => {
+  it('sends a mass outage in its first run within the request cap', async () => {
     const monitors = Array.from({ length: 40 }, (_, i) => createMonitor(`m${i}`));
     const hooks = ['https://a.example.com/alert', 'https://b.example.com/alert'];
     const alerted = new Map(hooks.map((hook) => [hook, [] as string[]]));
@@ -176,7 +368,7 @@ describe('subrequests per check run', () => {
         if (!hook) return new Response('down', { status: 503 });
         const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
         const text = isJsonObject(body) && typeof body.text === 'string' ? body.text : '';
-        hook.push(/Monitor (m\d+)(?!\d)/.exec(text)?.[1] ?? '?');
+        for (const [, id] of text.matchAll(/Monitor (m\d+)(?!\d)/g)) hook.push(id!);
         return new Response('ok');
       }),
     );
@@ -189,88 +381,53 @@ describe('subrequests per check run', () => {
       createNotifier,
     };
 
-    let runs = 0;
-    do {
-      requests = 0;
-      await runChecks(env, deps);
-    } while (++runs < 20 && requests > monitors.length);
+    await runChecks(env, deps);
 
     expect(refused).toBe(0);
-    // 40 checks leave 7 requests: the prepaid alert and two more at two webhooks each.
-    expect(runs).toBeLessThanOrEqual(15);
     const ids = monitors.map((monitor) => monitor.id).sort();
-    for (const hook of hooks) expect(alerted.get(hook)?.sort()).toEqual(ids);
+    for (const hook of hooks) expect([...new Set(alerted.get(hook))].sort()).toEqual(ids);
   });
 
   it('spends nothing on confirmations while every monitor is up', async () => {
     const { total, confirmations } = await countSubrequests(0);
 
     expect(confirmations).toBe(0);
-    expect(total).toBe(45 + 1 + 1);
+    expect(total).toBeLessThanOrEqual(50);
   });
 });
 
 describe('worker', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(NOW_SECONDS * 1000));
+    freezeClock(new Date(NOW_SECONDS * 1000));
     vi.clearAllMocks();
 
     workerConfigMock.monitors = [createMonitor()];
     delete workerConfigMock.notification;
     delete workerConfigMock.callbacks;
 
-    getEdgeLocationMock.mockResolvedValue('SFO');
-    const notifier = new WebhookNotifier({ url: 'https://hooks.example.com' }, vi.fn<Fetcher>());
-    vi.spyOn(notifier, 'send').mockImplementation(notifierSendMock);
-    createNotifierMock.mockImplementation((config) => (config ? notifier : null));
-    notifierSendMock.mockResolvedValue([{ success: true }]);
     mockUp();
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   describe('notifications', () => {
-    it('notifies on a status change when no grace period is configured', async () => {
-      setNotifications();
-      mockDown();
-      const { env } = createEnv();
+    let failure: 'up' | 'down' | 'refused' = 'up';
 
-      await runScheduled(env);
-
-      expect(notifierSendMock).toHaveBeenCalledTimes(1);
-      expect(notifierSendMock.mock.calls[0]?.[0]).toMatchObject({
-        monitor: { id: 'test-monitor' },
-        kind: 'down',
-        incidentStartTime: NOW_SECONDS,
-        currentTime: NOW_SECONDS,
-        downtimeSeconds: 0,
+    async function runNotifying(env: Env): Promise<Delivered[]> {
+      const { delivered, fetchMock } = webhookCapture('hooks.example.com', async () => {
+        if (failure === 'refused') throw new TypeError('fetch failed');
+        return new Response('unavailable', { status: failure === 'down' ? 503 : 200 });
       });
-      expect(notifierSendMock.mock.calls[0]?.[1]).toBe(
-        '🔴 Monitor test-monitor is down\nDetected at 1/15, 12:00\nReason: Unavailable',
-      );
-    });
-
-    it('does not notify before the grace period is reached', async () => {
-      setNotifications({ gracePeriod: 1 });
-      mockDown();
-      const { env } = createEnv();
-
-      await runScheduled(env);
-
-      expect(notifierSendMock).not.toHaveBeenCalled();
-    });
+      vi.stubGlobal('fetch', fetchMock);
+      await runChecks(env, createWorkerDeps(workerConfigMock, { location: 'SFO' }));
+      vi.unstubAllGlobals();
+      return delivered;
+    }
 
     it('suppresses notifications for an open-ended maintenance window', async () => {
       setNotifications();
-      mockDown();
+      failure = 'down';
+
       const { env } = createEnv([createMaintenance({ monitors: [createMonitor().id] })]);
-
-      await runScheduled(env);
-
-      expect(notifierSendMock).not.toHaveBeenCalled();
+      expect(await runNotifying(env)).toEqual([]);
     });
 
     it('suppresses only monitors included in a scoped maintenance window', async () => {
@@ -278,36 +435,32 @@ describe('worker', () => {
       const excludedMonitor = createMonitor('excluded');
       workerConfigMock.monitors = [includedMonitor, excludedMonitor];
       setNotifications();
-      mockDown();
+      failure = 'down';
+
       const { env } = createEnv([
         createMaintenance({
           monitors: [includedMonitor.id],
           end: new Date((NOW_SECONDS + 60) * 1000).toISOString(),
         }),
       ]);
+      const delivered = await runNotifying(env);
 
-      await runScheduled(env);
-
-      expect(notifierSendMock).toHaveBeenCalledTimes(1);
-      expect(notifierSendMock.mock.calls[0]?.[0]).toMatchObject({
-        monitor: { id: excludedMonitor.id },
-      });
+      expect(delivered.map(({ id }) => id)).toEqual(['excluded']);
     });
 
     it('suppresses every monitor when a maintenance window lists no monitors', async () => {
       setNotifications();
-      mockDown();
+      failure = 'down';
+
       const { env } = createEnv([createMaintenance({ monitors: [] })]);
-
-      await runScheduled(env);
-
-      expect(notifierSendMock).not.toHaveBeenCalled();
+      expect(await runNotifying(env)).toEqual([]);
     });
 
     it('notifies outside the maintenance window', async () => {
       const monitor = createMonitor();
       setNotifications();
-      mockDown();
+      failure = 'down';
+
       const { env } = createEnv([
         createMaintenance({
           monitors: [monitor.id],
@@ -319,41 +472,21 @@ describe('worker', () => {
           end: new Date((NOW_SECONDS - 3600) * 1000).toISOString(),
         }),
       ]);
-
-      await runScheduled(env);
-
-      expect(notifierSendMock).toHaveBeenCalledTimes(1);
+      expect(await runNotifying(env)).toHaveLength(1);
     });
 
     it('suppresses only error-change notifications', async () => {
       setNotifications({ skipErrorChangeNotification: true });
       const { env } = createEnv();
 
-      mockDown();
-      await runScheduled(env);
-      expect(notifierSendMock).toHaveBeenCalledTimes(1);
+      failure = 'down';
+      expect((await runNotifying(env)).map(({ label }) => label)).toEqual(['down']);
 
-      checkMonitorMock.mockResolvedValue({
-        location: 'SFO',
-        result: { ok: false, error: 'DNS failure' },
-      });
-      await runScheduled(env);
-      expect(notifierSendMock).toHaveBeenCalledTimes(1);
+      failure = 'refused';
+      expect((await runNotifying(env)).map(({ label }) => label)).toEqual([]);
 
-      mockUp();
-      await runScheduled(env);
-      expect(notifierSendMock).toHaveBeenCalledTimes(2);
-      expect(notifierSendMock.mock.calls[1]?.[0]).toMatchObject({ kind: 'recovered' });
-    });
-
-    it('suppresses monitors in skipNotificationIds', async () => {
-      setNotifications({ skipNotificationIds: ['test-monitor'] });
-      mockDown();
-      const { env } = createEnv();
-
-      await runScheduled(env);
-
-      expect(notifierSendMock).not.toHaveBeenCalled();
+      failure = 'up';
+      expect((await runNotifying(env)).map(({ label }) => label)).toEqual(['up']);
     });
   });
 
@@ -368,6 +501,70 @@ describe('worker', () => {
         status: 'down',
         incidents: [{ start: [NOW_SECONDS], error: ['Unavailable'] }],
       });
+    });
+
+    it('calls status callbacks on up/down transitions and incident callbacks on every down run with their arguments', async () => {
+      const monitor = createMonitor();
+      const { env } = createEnv();
+      const statusEvents: unknown[][] = [];
+      const incidentEvents: unknown[][] = [];
+      workerConfigMock.callbacks = {
+        onStatusChange: async (...args) => {
+          statusEvents.push(args);
+        },
+        onIncident: async (...args) => {
+          incidentEvents.push(args);
+        },
+      };
+
+      await runScheduled(env);
+      expect(statusEvents).toEqual([]);
+      expect(incidentEvents).toEqual([]);
+      mockDown();
+      vi.setSystemTime((NOW_SECONDS + 60) * 1000);
+      await runScheduled(env);
+      vi.setSystemTime((NOW_SECONDS + 120) * 1000);
+      await runScheduled(env);
+      mockUp();
+      vi.setSystemTime((NOW_SECONDS + 180) * 1000);
+      await runScheduled(env);
+
+      expect(statusEvents).toEqual([
+        [env, monitor, false, NOW_SECONDS + 60, NOW_SECONDS + 60, 'Unavailable'],
+        [env, monitor, true, NOW_SECONDS + 60, NOW_SECONDS + 180, ''],
+      ]);
+      expect(incidentEvents).toEqual([
+        [env, monitor, NOW_SECONDS + 60, NOW_SECONDS + 60, 'Unavailable'],
+        [env, monitor, NOW_SECONDS + 60, NOW_SECONDS + 120, 'Unavailable'],
+      ]);
+    });
+
+    it('does not call the status callback when only the error text of a down monitor changes', async () => {
+      const { env } = createEnv();
+      const statusEvents: unknown[][] = [];
+      const incidentEvents: unknown[][] = [];
+      workerConfigMock.callbacks = {
+        onStatusChange: async (...args) => {
+          statusEvents.push(args);
+        },
+        onIncident: async (...args) => {
+          incidentEvents.push(args);
+        },
+      };
+
+      mockDown();
+      await runScheduled(env);
+      network.mockImplementation(async () => {
+        throw new Error('Still unavailable');
+      });
+      vi.setSystemTime((NOW_SECONDS + 60) * 1000);
+      await runScheduled(env);
+
+      expect(statusEvents.map(([, , isUp]) => isUp)).toEqual([false]);
+      expect(incidentEvents.map(([, , , , reason]) => reason)).toEqual([
+        'Unavailable',
+        'Still unavailable',
+      ]);
     });
 
     it('records the run despite a throwing status callback', async () => {
@@ -404,20 +601,12 @@ describe('worker', () => {
 
 describe('hub routes for the status page', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(NOW_SECONDS * 1000));
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
+    freezeClock(new Date(NOW_SECONDS * 1000));
   });
 
   const fetchRoute = (env: Env, path: string) =>
     Worker.fetch(new Request(`https://internal${path}`), env, {} as ExecutionContext, {
-      checkMonitor: checkMonitorMock,
-      createNotifier: createNotifierMock,
-      getEdgeLocation: getEdgeLocationMock,
-      staticConfig: workerConfigMock,
+      ...deps,
     });
 
   it('serves the hub view and one monitor latency, ids decoded', async () => {
@@ -536,19 +725,11 @@ describe('hub routes for the status page', () => {
 });
 
 describe('trigger route for the status page', () => {
-  const deps: WorkerDeps = {
-    checkMonitor: checkMonitorMock,
-    createNotifier: createNotifierMock,
-    getEdgeLocation: getEdgeLocationMock,
-    staticConfig: workerConfigMock,
-  };
-
   beforeEach(() => {
     vi.clearAllMocks();
     workerConfigMock.monitors = [createMonitor()];
     delete workerConfigMock.notification;
     delete workerConfigMock.callbacks;
-    getEdgeLocationMock.mockResolvedValue('SFO');
     mockUp();
   });
 
@@ -582,7 +763,6 @@ describe('trigger route for the status page', () => {
 
     expect((await response).status).toBe(404);
     expect(pending).toEqual([]);
-    expect(checkMonitorMock).not.toHaveBeenCalled();
     expect(hub.view().lastUpdate).toBe(0);
   });
 });

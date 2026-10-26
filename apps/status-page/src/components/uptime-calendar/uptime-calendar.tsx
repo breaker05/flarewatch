@@ -13,8 +13,32 @@ const MONTHS_PER_PAGE = 3;
 interface UptimeCalendarProps {
   monitors: PublicMonitor[];
   state: StatusView;
-  /** The month to end the calendar window at (yyyy-MM). Defaults to the current month. */
-  selectedMonth?: string;
+  /** The month to end the calendar window at (yyyy-MM). */
+  selectedMonth: string;
+}
+
+function getMonthUptimes(
+  calendarGrids: ReturnType<typeof generateCalendarGrids>,
+  dataMap: Map<string, AggregatedDayData>,
+) {
+  const monthUptimes = new Map<string, number | null>();
+  for (const grid of calendarGrids) {
+    let sum = 0;
+    let count = 0;
+    for (const week of grid.weeks) {
+      for (const day of week) {
+        if (!day) continue;
+        const data = dataMap.get(getDateKey(day.date));
+        if (data && data.status !== 'unknown' && data.uptime != null) {
+          sum += data.uptime;
+          count++;
+        }
+      }
+    }
+    monthUptimes.set(grid.yearMonth, count > 0 ? sum / count : null);
+  }
+
+  return monthUptimes;
 }
 
 export function UptimeCalendar({ monitors, state, selectedMonth }: UptimeCalendarProps) {
@@ -36,22 +60,7 @@ export function UptimeCalendar({ monitors, state, selectedMonth }: UptimeCalenda
 
   const dataMap = new Map(aggregatedDays.map((day) => [getDateKey(day.date), day]));
 
-  const monthUptimes = new Map<string, number | null>();
-  for (const grid of calendarGrids) {
-    let sum = 0;
-    let count = 0;
-    for (const week of grid.weeks) {
-      for (const day of week) {
-        if (!day) continue;
-        const data = dataMap.get(getDateKey(day.date));
-        if (data && data.status !== 'unknown' && data.uptime != null) {
-          sum += data.uptime;
-          count++;
-        }
-      }
-    }
-    monthUptimes.set(grid.yearMonth, count > 0 ? sum / count : null);
-  }
+  const monthUptimes = getMonthUptimes(calendarGrids, dataMap);
 
   const firstGrid = calendarGrids[0];
   const lastGrid = calendarGrids[calendarGrids.length - 1];
@@ -63,7 +72,7 @@ export function UptimeCalendar({ monitors, state, selectedMonth }: UptimeCalenda
 
   return (
     <>
-      <Card className="py-0 gap-0 mb-6">
+      <Card size="flush" className="mb-6">
         <div className="px-4 pt-4 pb-3">
           <div className="flex items-center justify-between mb-4">
             <div className="text-sm font-semibold text-foreground">Uptime History</div>

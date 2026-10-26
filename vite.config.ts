@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite-plus';
 
+// pnpm rewrites this file on every install.
+const ignorePnpmState = '!node_modules/.modules.yaml';
+
 export default defineConfig({
   lint: {
     ignorePatterns: [
@@ -19,6 +22,7 @@ export default defineConfig({
         name: 'anti-slop',
         specifier: './tools/oxlint/anti-slop/index.ts',
       },
+      { name: 'shadcn', specifier: '@shadcn/lint' },
     ],
     rules: {
       'react-hooks-js/set-state-in-render': 'error',
@@ -44,8 +48,59 @@ export default defineConfig({
       'typescript/no-unsafe-call': 'error',
       'typescript/no-unsafe-member-access': 'error',
       'typescript/no-unsafe-return': 'error',
+      'shadcn/no-restyle': [
+        'error',
+        {
+          allow: ['layout'],
+          contracts: [
+            {
+              pattern: '^(TooltipTrigger|DropdownMenuTrigger)$',
+              allow: [
+                'layout',
+                'color',
+                'typography',
+                'spacing',
+                'shape',
+                'effects',
+                'motion',
+                'animate-calendar-cell',
+              ],
+            },
+          ],
+        },
+      ],
+      'shadcn/no-raw-colors': 'error',
+      'shadcn/no-arbitrary-values': ['error', { allow: ['layout'] }],
+      'shadcn/no-inline-styles': 'error',
+      'shadcn/no-unknown-classes': 'error',
+      'shadcn/require-static-classes': 'error',
     },
     overrides: [
+      {
+        // Composites that build on other primitives.
+        files: [
+          'apps/status-page/src/components/ui/calendar.tsx',
+          'apps/status-page/src/components/ui/datetime-picker.tsx',
+          'apps/status-page/src/components/ui/dropdown-menu.tsx',
+          'apps/status-page/src/components/ui/empty-state.tsx',
+          'apps/status-page/src/components/ui/field.tsx',
+          'apps/status-page/src/components/ui/month-picker.tsx',
+        ],
+        rules: {
+          'shadcn/no-restyle': 'off',
+        },
+      },
+      {
+        // These pass their own cva() output on, which the rule cannot read.
+        files: [
+          'apps/status-page/src/components/ui/calendar.tsx',
+          'apps/status-page/src/components/ui/status-cell.tsx',
+          'apps/status-page/src/components/ui/uptime-badge.tsx',
+        ],
+        rules: {
+          'shadcn/require-static-classes': 'off',
+        },
+      },
       {
         files: ['apps/status-page/src/**'],
         rules: {
@@ -60,6 +115,23 @@ export default defineConfig({
         ],
         rules: {
           'anti-slop/require-safety-comment-for-type-assertion': 'off',
+        },
+      },
+      {
+        files: ['apps/status-page/tests/e2e/**/*.spec.ts'],
+        rules: {
+          'no-restricted-imports': [
+            'error',
+            {
+              paths: [
+                {
+                  name: '@playwright/test',
+                  importNames: ['test'],
+                  message: "Import test from './fixtures': it fails a test on a client error.",
+                },
+              ],
+            },
+          ],
         },
       },
     ],
@@ -112,7 +184,7 @@ export default defineConfig({
         },
       },
       'worker-build': {
-        command: 'pnpm exec wrangler deploy src/index.ts --outdir dist --dry-run',
+        command: 'vp exec wrangler deploy src/index.ts --outdir dist --dry-run',
         cwd: 'services/worker',
         cache: {
           input: [{ auto: true }, '!services/worker/dist/**'],
@@ -124,21 +196,18 @@ export default defineConfig({
         cache: {
           input: [
             { auto: true },
+            ignorePnpmState,
             '!apps/status-page/node_modules/.vite/**',
             '!apps/status-page/node_modules/.vite-temp/**',
           ],
         },
       },
       'worker-test': {
-        command: 'vp test run',
+        // The fingerprint holds the listing of the worker's node_modules, so Vite's cache and config bundle stay out of it.
+        command: 'vp test run --configLoader runner',
         cwd: 'services/worker',
         cache: {
-          input: [
-            { auto: true },
-            '!services/worker/node_modules/.vite/**',
-            '!services/worker/node_modules/.vite-temp/**',
-            '!services/worker/tests/workerd/.wrangler/**',
-          ],
+          input: [{ auto: true }, ignorePnpmState, '!node_modules/.vite/**'],
         },
       },
       'shared-test': {
@@ -147,6 +216,7 @@ export default defineConfig({
         cache: {
           input: [
             { auto: true },
+            ignorePnpmState,
             '!packages/shared/node_modules/.vite/**',
             '!packages/shared/node_modules/.vite-temp/**',
           ],

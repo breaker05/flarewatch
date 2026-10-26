@@ -1,6 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { Fetcher, JsonValue, MonitorTarget } from '@flarewatch/shared';
 import { GlobalPingChecker } from '../../src/checkers/globalping';
+import { finishedMeasurement } from '../helpers/globalping';
+import { createMonitor as createHttpMonitor } from '@flarewatch/shared/testing/monitors';
+import { freezeClock } from '@flarewatch/shared/testing/clock';
 
 const fetchMock = vi.fn<Fetcher>();
 const checker = new GlobalPingChecker(fetchMock);
@@ -11,36 +14,11 @@ const check = (monitor: MonitorTarget) =>
   });
 
 function createMonitor(overrides: Partial<MonitorTarget> = {}): MonitorTarget {
-  return {
-    id: 'test-monitor',
-    name: 'Test Monitor',
-    method: 'GET',
-    target: 'https://example.com',
-    checkProxy: 'globalping://test-token',
-    ...overrides,
-  };
+  return createHttpMonitor({ checkProxy: 'globalping://test-token', ...overrides });
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status });
-}
-
-function finishedHttpMeasurement(resultOverrides: Record<string, JsonValue> = {}): JsonValue {
-  return {
-    status: 'finished',
-    results: [
-      {
-        probe: { country: 'FI', city: 'Helsinki' },
-        result: {
-          status: 'finished',
-          statusCode: 200,
-          rawBody: 'ok',
-          timings: { total: 12.6 },
-          ...resultOverrides,
-        },
-      },
-    ],
-  };
+  return Response.json(body, { status });
 }
 
 function mockCompletedMeasurement(measurement: JsonValue): void {
@@ -51,17 +29,11 @@ function mockCompletedMeasurement(measurement: JsonValue): void {
 
 describe('GlobalPingChecker', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2025-01-15T12:00:00Z'));
-    fetchMock.mockReset();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
+    freezeClock(new Date('2025-01-15T12:00:00Z'));
   });
 
   it('parses proxy settings and builds an HTTP measurement request', async () => {
-    mockCompletedMeasurement(finishedHttpMeasurement());
+    mockCompletedMeasurement(finishedMeasurement());
 
     const result = await check(
       createMonitor({
@@ -85,6 +57,7 @@ describe('GlobalPingChecker', () => {
         Authorization: 'Bearer CaseSensitiveToken',
       },
       timeout: 5000,
+      redirect: 'manual',
     });
     expect(typeof body).toBe('string');
     expect(JSON.parse(body as string)).toEqual({
@@ -148,7 +121,7 @@ describe('GlobalPingChecker', () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse({ id: 'measurement-1' }, 202))
       .mockResolvedValueOnce(jsonResponse({ status: 'in-progress', results: [] }))
-      .mockResolvedValueOnce(jsonResponse(finishedHttpMeasurement()));
+      .mockResolvedValueOnce(jsonResponse(finishedMeasurement()));
 
     const resultPromise = check(createMonitor());
     await vi.advanceTimersByTimeAsync(1000);
@@ -189,13 +162,13 @@ describe('GlobalPingChecker', () => {
   it('checks a JSON value in the body the probe reports', async () => {
     const monitor = createMonitor({ responseJsonPath: '$.status', responseJsonValue: 'ok' });
 
-    mockCompletedMeasurement(finishedHttpMeasurement({ rawBody: '{"status":"ok"}' }));
+    mockCompletedMeasurement(finishedMeasurement({ rawBody: '{"status":"ok"}' }));
     expect(await check(monitor)).toEqual({
       location: 'FI/Helsinki',
       result: { ok: true, latency: 13 },
     });
 
-    mockCompletedMeasurement(finishedHttpMeasurement({ rawBody: '{"status":"down"}' }));
+    mockCompletedMeasurement(finishedMeasurement({ rawBody: '{"status":"down"}' }));
     expect(await check(monitor)).toEqual({
       location: 'FI/Helsinki',
       result: { ok: false, error: 'JSON value at $.status is not "ok"', latency: 13 },
@@ -204,7 +177,7 @@ describe('GlobalPingChecker', () => {
 
   it('returns parsed TLS certificate information', async () => {
     mockCompletedMeasurement(
-      finishedHttpMeasurement({
+      finishedMeasurement({
         tls: {
           authorized: true,
           certificate: {
@@ -233,9 +206,9 @@ describe('GlobalPingChecker', () => {
     });
   });
 
-  it('fails when certificate expiry reaches the configured threshold', async () => {
+  it('passes when certificate expiry reaches the configured warning threshold', async () => {
     mockCompletedMeasurement(
-      finishedHttpMeasurement({
+      finishedMeasurement({
         tls: {
           authorized: true,
           certificate: { expiresAt: '2025-01-29T12:00:00Z' },
@@ -250,16 +223,53 @@ describe('GlobalPingChecker', () => {
     expect(result).toEqual({
       location: 'FI/Helsinki',
       result: {
-        ok: false,
-        error: 'Certificate expires in 14 days (threshold: 14)',
+        ok: true,
+        ssl: { expiryDate: 1738152000, daysUntilExpiry: 14 },
         latency: 13,
       },
     });
   });
 
+  it.each(['2025-01-15T12:00:00Z', '2025-01-14T12:00:00Z'])(
+    'fails an expired certificate at %s',
+    async (expiresAt) => {
+      mockCompletedMeasurement(
+        finishedMeasurement({ tls: { authorized: true, certificate: { expiresAt } } }),
+      );
+      expect((await check(createMonitor({ sslCheckEnabled: true }))).result).toMatchObject({
+        ok: false,
+        error: 'Certificate has expired',
+      });
+    },
+  );
+
+  it('fails a certificate check whose expiry date does not parse, without NaN metadata', async () => {
+    mockCompletedMeasurement(
+      finishedMeasurement({
+        tls: { authorized: true, certificate: { expiresAt: 'not-a-date' } },
+      }),
+    );
+
+    const result = await check(createMonitor({ sslCheckEnabled: true }));
+
+    expect(result.result).toMatchObject({ ok: false, error: 'Invalid certificate expiry date' });
+    expect(JSON.stringify(result)).not.toContain('NaN');
+  });
+
+  it('fails a measurement that finishes without a probe result', async () => {
+    mockCompletedMeasurement({ status: 'finished', results: [] });
+
+    const result = await check(createMonitor());
+
+    expect(result).toEqual({
+      location: 'ERROR',
+      result: { ok: false, error: 'GlobalPing: No probe result returned' },
+    });
+  });
+
   it('fails an unauthorized TLS certificate by default', async () => {
     mockCompletedMeasurement(
-      finishedHttpMeasurement({
+      finishedMeasurement({
         tls: { authorized: false, error: 'unable to verify the first certificate' },
       }),
     );
@@ -278,7 +288,7 @@ describe('GlobalPingChecker', () => {
 
   it('ignores an unauthorized self-signed certificate when configured', async () => {
     mockCompletedMeasurement(
-      finishedHttpMeasurement({
+      finishedMeasurement({
         tls: { authorized: false, error: 'self signed certificate' },
       }),
     );
@@ -328,16 +338,6 @@ describe('GlobalPingChecker', () => {
       location: 'ERROR',
       result: { ok: false, error: 'GlobalPing: response is over 1048576 bytes' },
     });
-  });
-
-  it('fails a measurement poll whose JSON is over 1 MiB', async () => {
-    mockCompletedMeasurement(finishedHttpMeasurement({ rawBody: 'x'.repeat(1024 * 1024) }));
-
-    const result = await check(createMonitor());
-
-    expect(result.location).toBe('ERROR');
-    expect(result.result.ok).toBe(false);
-    expect(result.result.ok ? '' : result.result.error).toContain('over 1048576 bytes');
   });
 
   it('fails the check when measurement creation returns no id', async () => {

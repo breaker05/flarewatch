@@ -9,7 +9,8 @@ export const privateMonitor: MonitorTarget = {
   id: 'demo_private_internal',
   name: 'Internal Billing API',
   method: 'GET',
-  target: 'https://internal.example.com/health',
+  // The fake OIDC server answers 404.
+  target: 'http://127.0.0.1:3102/health',
   link: false,
   private: true,
 };
@@ -22,7 +23,7 @@ const heartbeat = (
   options: { private?: boolean } = {},
 ): HeartbeatMonitor => ({ id, name, method: 'HEARTBEAT', periodSeconds, graceSeconds, ...options });
 
-export const heartbeatMonitors: HeartbeatMonitor[] = [
+const heartbeatMonitors: HeartbeatMonitor[] = [
   heartbeat('demo_nightly_backup', 'Nightly Backup', DAY, 30 * MINUTE),
   heartbeat('demo_hourly_report', 'Hourly Report', HOUR, 5 * MINUTE),
   heartbeat('demo_weekly_prune', 'Weekly Prune', 7 * DAY, HOUR),

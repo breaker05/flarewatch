@@ -40,7 +40,7 @@ type TimelineProjectionInput = {
   monthEnd: Date;
   nowMs: number;
   selectedMonitor?: string | undefined;
-  eventType?: TimelineEventType | undefined;
+  eventType: TimelineEventType;
   /** Of a window's future runs, list only the next one: for a range with no real end. */
   nextRunOnly?: boolean | undefined;
 };
@@ -72,13 +72,13 @@ export function projectPublicData(
       status,
       latency: latestLatency?.ping ?? null,
       location: latestLatency?.loc ?? null,
-      message: up ? 'OK' : (error ?? 'Unknown error'),
+      message: up ? (state.monitors[monitor.id]?.warning ?? 'OK') : (error ?? 'Unknown error'),
     };
   }
 
-  const { up, late, slow, down } = countStatuses(monitors, state, maintenances);
+  const { up, late, slow, expiry, down } = countStatuses(monitors, state, maintenances);
   return {
-    up: up + late + slow,
+    up: up + late + slow + expiry,
     down,
     updatedAt: state.lastUpdate,
     monitors: projectedMonitors,
@@ -195,7 +195,7 @@ export function projectTimeline(input: TimelineProjectionInput): TimelineProject
   const pinned: MaintenanceEvent[] = [];
   const timeline: TimelineEvent[] = [];
 
-  if ((input.eventType ?? 'all') === 'all') {
+  if (input.eventType === 'all') {
     for (const event of sortedEvents) {
       if (event.type === 'maintenance') {
         const { maintenance, occurrence } = event;

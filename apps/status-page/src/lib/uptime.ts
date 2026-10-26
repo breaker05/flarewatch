@@ -62,20 +62,30 @@ export function getLatestLatency(monitorId: string, state: StatusView): LatencyS
   return state.monitors[monitorId]?.latest ?? null;
 }
 
+/** Rounds like `toFixed`, but uptime below 100 never shows as 100%. */
+export function formatPercent(percent: number, decimals: number): string {
+  const rounded = percent.toFixed(decimals);
+  if (percent < 100 && Number(rounded) >= 100) {
+    return `${(100 - 10 ** -decimals).toFixed(decimals)}%`;
+  }
+  return `${rounded}%`;
+}
+
 export function formatUptimeDisplay(
   uptimePercent: number | null,
   hasStarted: boolean,
   decimals: number,
 ): string {
   if (uptimePercent !== null) {
-    return `${uptimePercent.toFixed(decimals)}%`;
+    return formatPercent(uptimePercent, decimals);
   }
   return hasStarted ? 'Starting...' : 'Pending';
 }
 
-export type DayStatus = 'up' | 'down' | 'partial' | 'unknown';
+type DayStatus = 'up' | 'down' | 'partial' | 'unknown';
 
 interface DayIncidentDetail {
+  startSec: number;
   startTime: string;
   endTime: string;
   error: string;
@@ -83,13 +93,13 @@ interface DayIncidentDetail {
 
 export interface AggregatedDayIncident extends DayIncidentDetail {
   monitorName: string;
+  monitorId: string;
 }
 
 export interface AggregatedDayData {
   date: Date;
   status: DayStatus;
   uptime: number | null;
-  totalDowntime: number;
   incidents: AggregatedDayIncident[];
 }
 
@@ -183,6 +193,7 @@ export function generateDailyStatus(monitorId: string, state: StatusView): Daily
             const errorMsg = incident.error[j];
 
             dayIncidents.push({
+              startSec: partStart,
               startTime: formatUtc(new Date(clampedStart * 1000), 'HH:mm'),
               endTime: formatUtc(new Date(clampedEnd * 1000), 'HH:mm'),
               error: errorMsg ?? 'Unknown error',
@@ -240,7 +251,6 @@ export function generateAggregateDailyStatus(
     let allUnknown = true;
     let uptimeSum = 0;
     let uptimeCount = 0;
-    let totalDowntime = 0;
     const incidents: AggregatedDayIncident[] = [];
 
     for (let m = 0; m < monitorIds.length; m++) {
@@ -257,10 +267,8 @@ export function generateAggregateDailyStatus(
       if (dayData.status === 'down') hasDown = true;
       if (dayData.status === 'partial') hasPartial = true;
 
-      totalDowntime += dayData.downtime;
-
       for (const incident of dayData.incidents) {
-        incidents.push({ ...incident, monitorName });
+        incidents.push({ ...incident, monitorName, monitorId });
       }
     }
 
@@ -279,7 +287,6 @@ export function generateAggregateDailyStatus(
       date,
       status,
       uptime: uptimeCount > 0 ? uptimeSum / uptimeCount : null,
-      totalDowntime,
       incidents,
     });
   }

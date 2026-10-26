@@ -40,9 +40,6 @@ export const COOKIE_NAMES = {
 
 export const PAGE_CONTAINER_CLASSES = 'container mx-auto max-w-5xl px-4 py-6';
 
-// Also the loading skeleton's height.
-export const CHART_HEIGHT_PX = 150;
-
 export const STATUS_BAR = {
   MOBILE_BAR_WIDTH: 12, // w-2.5 (10px) + gap-0.5 (2px)
 } as const;
@@ -59,9 +56,4 @@ export const STATUS_COLORS = {
   down: 'bg-status-down',
   partial: 'bg-status-degraded',
   unknown: 'bg-status-unknown-bg',
-} as const;
-
-// Status-bar segments and small dots reuse the same tokens.
-export const STATUS_DOT_COLORS = {
-  ...STATUS_COLORS,
 } as const;

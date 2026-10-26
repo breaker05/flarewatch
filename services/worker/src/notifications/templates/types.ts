@@ -2,9 +2,8 @@ import type { AlertKind } from '../../hub/alerts';
 
 export interface TemplateContext {
   monitorName: string;
-  monitorId: string;
   targetUrl: string;
-  kind: AlertKind;
+  kind: AlertKind | 'summary';
   /** A down alert sent the run its outage began, which reads "is down" rather than "is still down". */
   isInitialOutage: boolean;
   downtimeMinutes: number;

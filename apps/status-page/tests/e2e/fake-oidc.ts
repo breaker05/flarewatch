@@ -1,11 +1,17 @@
 // A stand-in OpenID Connect provider for the browser tests. Its sign-in page
 // lists the test people; picking one returns to the status page with a code.
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 
 const port = Number(process.env.FAKE_OIDC_PORT ?? 3102);
 const issuer = `http://127.0.0.1:${port}`;
 const people = ['operator@e2e.test', 'member@e2e.test', 'partner@e2e.test', 'stranger@e2e.test'];
-const codes = new Map<string, { email: string; nonce: string }>();
+/** A code is good once, and only for a minute, as a real provider's is. */
+const CODE_MS = 60_000;
+const codes = new Map<
+  string,
+  { email: string; nonce: string; challenge: string; method: string; expires: number }
+>();
 
 const encode = (value: unknown) =>
   btoa(JSON.stringify(value)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -27,10 +33,17 @@ createServer((request, response) => {
   }
 
   if (url.pathname === '/authorize') {
+    for (const [code, { expires }] of codes) if (expires < Date.now()) codes.delete(code);
     const back = new URL(url.searchParams.get('redirect_uri') ?? '/');
     const links = people.map((email) => {
       const code = crypto.randomUUID();
-      codes.set(code, { email, nonce: url.searchParams.get('nonce') ?? '' });
+      codes.set(code, {
+        email,
+        nonce: url.searchParams.get('nonce') ?? '',
+        challenge: url.searchParams.get('code_challenge') ?? '',
+        method: url.searchParams.get('code_challenge_method') ?? '',
+        expires: Date.now() + CODE_MS,
+      });
       back.search = new URLSearchParams({
         code,
         state: url.searchParams.get('state') ?? '',
@@ -47,13 +60,23 @@ createServer((request, response) => {
     request.setEncoding('utf8');
     request.on('data', (chunk: string) => (body += chunk));
     request.on('end', () => {
-      const grant = codes.get(new URLSearchParams(body).get('code') ?? '');
+      const params = new URLSearchParams(body);
+      const code = params.get('code') ?? '';
+      const grant = codes.get(code);
+      const verifier = params.get('code_verifier') ?? '';
       response.setHeader('Content-Type', 'application/json');
-      if (!grant) {
+      if (
+        !grant ||
+        grant.expires < Date.now() ||
+        !verifier ||
+        grant.method !== 'S256' ||
+        createHash('sha256').update(verifier).digest('base64url') !== grant.challenge
+      ) {
         response.statusCode = 400;
         response.end(JSON.stringify({ error: 'invalid_grant' }));
         return;
       }
+      codes.delete(code);
       const claims = {
         iss: issuer,
         aud: 'flarewatch-e2e',

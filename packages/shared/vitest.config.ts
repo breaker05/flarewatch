@@ -1,10 +1,9 @@
 import { defineConfig } from 'vite-plus/test/config';
+import { commonTestOptions } from '@flarewatch/vitest-config';
 
 export default defineConfig({
   test: {
-    globals: true,
-    environment: 'node',
+    ...commonTestOptions,
     include: ['tests/**/*.test.ts'],
-    setupFiles: ['../../vitest.setup.ts'],
   },
 });

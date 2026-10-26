@@ -1,27 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vite-plus/test';
+import { describe, it, expect, beforeEach, vi } from 'vite-plus/test';
 import type { MonitorView, StatusView } from '@flarewatch/shared';
 import {
   calculateUptimePercent,
+  formatUptimeDisplay,
   generateAggregateDailyStatus,
   generateDailyStatus,
   getMonitorError,
-  getLatestLatency,
 } from '@/lib/uptime';
+import { statusView } from '../helpers/status-view';
 
-function view(
+const view = (
   monitors: Record<string, Partial<MonitorView>>,
   lastUpdate = Math.floor(Date.now() / 1000),
-): StatusView {
-  return {
-    lastUpdate,
-    monitors: Object.fromEntries(
-      Object.entries(monitors).map(([id, monitor]) => [
-        id,
-        { status: 'up', incidents: [], ...monitor },
-      ]),
-    ),
-  };
-}
+): StatusView => statusView(monitors, lastUpdate);
 
 describe('uptime utilities', () => {
   beforeEach(() => {
@@ -29,11 +20,19 @@ describe('uptime utilities', () => {
     vi.setSystemTime(new Date('2025-01-15T12:00:00Z'));
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   describe('calculateUptimePercent', () => {
+    it('changes from unknown to known at exactly sixty seconds of monitor age', () => {
+      const before = view({ test: { startedAt: 100 } }, 159);
+      const boundary = view({ test: { startedAt: 100 } }, 160);
+
+      expect(calculateUptimePercent('test', before)).toBeNull();
+      expect(generateDailyStatus('test', before).every((day) => day.status === 'unknown')).toBe(
+        true,
+      );
+      expect(calculateUptimePercent('test', boundary)).toBe(100);
+      expect(generateDailyStatus('test', boundary).at(-1)?.status).toBe('up');
+    });
+
     it('returns 100% when there are no incidents', () => {
       const state = view({ test: { startedAt: Math.floor(Date.now() / 1000) - 86400 } });
 
@@ -116,16 +115,6 @@ describe('uptime utilities', () => {
       expect(result).toHaveLength(90);
       expect(result.filter((day) => day.status === 'unknown')).toHaveLength(89);
       expect(result[89]?.status).toBe('up');
-    });
-
-    it('returns correct status based on downtime thresholds', () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const state = view({ test: { startedAt: nowSec - 90 * 24 * 60 * 60 } });
-
-      const result = generateDailyStatus('test', state);
-
-      const todayStatus = result[result.length - 1];
-      expect(todayStatus?.status).toBe('up');
     });
 
     it.each([
@@ -217,15 +206,23 @@ describe('uptime utilities', () => {
     });
   });
 
-  describe('getLatestLatency', () => {
-    it('returns null when there is no latency data', () => {
-      expect(getLatestLatency('test', view({ test: {} }))).toBeNull();
+  describe('formatUptimeDisplay', () => {
+    it('never rounds uptime below 100 up to 100%', () => {
+      expect(formatUptimeDisplay(99.96, true, 1)).toBe('99.9%');
+      expect(formatUptimeDisplay(99.996, true, 2)).toBe('99.99%');
+      expect(formatUptimeDisplay(99.9999, true, 0)).toBe('99%');
     });
 
-    it('returns the latest latency sample when present', () => {
-      const state = view({ test: { latest: { loc: 'EU', ping: 120, time: 2 } } });
+    it('rounds other values to the given decimals', () => {
+      expect(formatUptimeDisplay(100, true, 2)).toBe('100.00%');
+      expect(formatUptimeDisplay(98.76, true, 1)).toBe('98.8%');
+      expect(formatUptimeDisplay(99.954, true, 2)).toBe('99.95%');
+      expect(formatUptimeDisplay(0, true, 2)).toBe('0.00%');
+    });
 
-      expect(getLatestLatency('test', state)).toEqual({ loc: 'EU', ping: 120, time: 2 });
+    it('names a monitor without uptime by whether it has started', () => {
+      expect(formatUptimeDisplay(null, true, 2)).toBe('Starting...');
+      expect(formatUptimeDisplay(null, false, 2)).toBe('Pending');
     });
   });
 });

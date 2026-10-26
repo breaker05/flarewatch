@@ -1,4 +1,7 @@
-import { expect, request as playwrightRequest, test, type Page } from '@playwright/test';
+import { createHmac } from 'node:crypto';
+import { expect, request as playwrightRequest, type Page, type Request } from '@playwright/test';
+import { test } from './fixtures';
+import { captureLatencyCall } from './latency-call';
 
 test.skip(
   Boolean(process.env.PLAYWRIGHT_BASE_URL),
@@ -18,13 +21,25 @@ async function signIn(page: Page): Promise<void> {
 }
 
 test('visitors of a private page get the sign-in page and nothing else', async ({ request }) => {
-  for (const path of ['/', '/history', '/monitors/demo_example', '/embed/demo_example', '/nope']) {
+  for (const path of [
+    '/',
+    '/history',
+    '/monitors/demo_example',
+    '/embed/demo_example',
+    '/feed.atom',
+    '/nope',
+  ]) {
     const response = await request.get(path, { maxRedirects: 0 });
     expect(response.status(), path).toBe(302);
     expect(response.headers().location, path).toMatch(/\/login$/);
   }
 
-  for (const path of ['/api/data', '/api/maintenances', '/api/badge?id=demo_example']) {
+  for (const path of [
+    '/api/data',
+    '/api/maintenances',
+    '/api/badge?id=demo_example',
+    '/api/badge.svg?id=demo_example',
+  ]) {
     expect((await request.get(path)).status(), path).toBe(404);
   }
 
@@ -57,6 +72,23 @@ test('the operator signs in to the full page and signs out to the sign-in page',
   await expect(page.getByText('This status page is private.')).toBeVisible();
 });
 
+async function replay(
+  captured: Request,
+  baseURL: string | undefined,
+  withCookie: boolean,
+): Promise<string> {
+  const { cookie, ...headers } = await captured.allHeaders();
+  const context = await playwrightRequest.newContext({ baseURL });
+  try {
+    const response = await context.get(captured.url(), {
+      headers: withCookie && cookie ? { ...headers, cookie } : headers,
+    });
+    return await response.text();
+  } finally {
+    await context.dispose();
+  }
+}
+
 test('the visitor data call refuses anyone but the operator', async ({ page, baseURL }) => {
   await signIn(page);
 
@@ -65,19 +97,50 @@ test('the visitor data call refuses anyone but the operator', async ({ page, bas
   await page.getByRole('button', { name: /Account menu/ }).click();
   await page.getByRole('menuitemcheckbox', { name: 'Visitor view' }).click();
   const captured = await call;
-  const { cookie, ...headers } = await captured.allHeaders();
 
-  const replay = async (withCookie: boolean) => {
-    const context = await playwrightRequest.newContext({ baseURL });
-    const response = await context.get(captured.url(), {
-      headers: withCookie && cookie ? { ...headers, cookie } : headers,
-    });
-    const body = await response.text();
-    await context.dispose();
-    return body;
-  };
-
-  expect(await replay(true)).toContain('Example Domain');
-  const anonymous = await replay(false);
+  expect(await replay(captured, baseURL, true)).toContain('Example Domain');
+  const anonymous = await replay(captured, baseURL, false);
   for (const name of publishedNames) expect(anonymous).not.toContain(name);
+});
+
+test('the latency call serves the operator and refuses visitors', async ({ page, baseURL }) => {
+  await signIn(page);
+
+  const captured = await captureLatencyCall(page, 'demo_example', /^Example Domain, operational, /);
+
+  expect(await replay(captured, baseURL, true)).toContain('HEL');
+  const anonymous = await replay(captured, baseURL, false);
+  expect(anonymous).not.toContain('"loc"');
+  expect(anonymous).toContain('"a":[]');
+});
+
+/** A ping URL's token: base64url(HMAC-SHA256(secret, `v1:<id>`)), 32 characters. */
+function pingToken(id: string): string {
+  return createHmac('sha256', 'e2e-heartbeat-secret')
+    .update(`v1:${id}`)
+    .digest('base64url')
+    .slice(0, 32);
+}
+
+// A ping changes the job's phase at the next check run, and the suite runs no cron,
+// so the test reads the run a success ping adds to the history at once.
+test('a job pings through the private page and the operator sees its run', async ({
+  page,
+  request,
+}) => {
+  const ping = `/ping/demo_private_backup/${pingToken('demo_private_backup')}`;
+  await signIn(page);
+
+  const start = await request.post(`${ping}/start`);
+  expect([start.status(), await start.text()]).toEqual([200, 'OK']);
+  const done = await request.get(ping);
+  expect([done.status(), await done.text()]).toEqual([200, 'OK']);
+  await expect(async () => {
+    await page.goto('/');
+    await expect(
+      page.getByRole('link', { name: /^Internal Vault Backup, operational, .*last 2 runs/ }),
+    ).toBeVisible({ timeout: 2000 });
+  }).toPass({ timeout: 30_000 });
+
+  expect((await request.get(`/ping/demo_private_backup/${'x'.repeat(32)}`)).status()).toBe(404);
 });

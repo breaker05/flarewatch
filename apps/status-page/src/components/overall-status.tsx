@@ -19,31 +19,28 @@ const statusConfig = {
     icon: IconCircleCheck,
     title: 'All systems operational',
     bgClass: 'bg-status-operational-bg',
-    borderClass: 'border border-status-operational-border',
-    iconClass: 'text-status-operational',
+    iconClass: 'text-status-operational-text',
     badgeVariant: 'default' as const,
   },
   degraded: {
     icon: IconAlertTriangle,
     title: 'Some systems are down',
     bgClass: 'bg-status-degraded-bg',
-    borderClass: 'border border-status-degraded-border',
-    iconClass: 'text-status-degraded',
+    iconClass: 'text-status-degraded-text',
     badgeVariant: 'secondary' as const,
   },
   down: {
     icon: IconCircleX,
     title: 'All systems down',
     bgClass: 'bg-status-down-bg',
-    borderClass: 'border border-status-down-border',
-    iconClass: 'text-status-down',
+    iconClass: 'text-status-down-text',
     badgeVariant: 'destructive' as const,
   },
 };
 
 export function OverallStatus({ monitors, state, maintenances }: OverallStatusProps) {
   const counts = countStatuses(monitors, state, maintenances);
-  const { up, late, slow, down } = counts;
+  const { up, late, slow, expiry, down } = counts;
   const monitorCount = monitors.length;
   const jobCount = monitors.filter((monitor) => monitor.method === 'HEARTBEAT').length;
   const status = getOverallStatus(counts);
@@ -60,6 +57,14 @@ export function OverallStatus({ monitors, state, maintenances }: OverallStatusPr
     if (status !== 'degraded') return [config.title];
 
     if (down === 0) {
+      if (expiry > 0) {
+        if (late + slow === 0)
+          return [
+            'Some systems have expiry warnings',
+            `(${expiry} out of ${monitorCount - jobCount})`,
+          ];
+        return ['Some systems are degraded', `(${late + slow + expiry} out of ${monitorCount})`];
+      }
       if (slow === 0) return ['Some jobs are running late', `(${late} out of ${jobCount})`];
       if (late === 0) {
         return ['Some systems are slow', `(${slow} out of ${monitorCount - jobCount})`];
@@ -82,7 +87,7 @@ export function OverallStatus({ monitors, state, maintenances }: OverallStatusPr
   }
 
   return (
-    <Card className={cn('p-0 shadow-none ring-0', config.bgClass, config.borderClass)}>
+    <Card size="flush" variant={status}>
       <div className="flex items-center gap-2 px-3 py-2.5">
         <div className={cn('rounded-full p-1.5', config.bgClass)}>
           <StatusIcon className={cn('h-6 w-6', config.iconClass)} />
@@ -92,7 +97,7 @@ export function OverallStatus({ monitors, state, maintenances }: OverallStatusPr
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <h2 className="text-base sm:text-lg font-semibold text-balance text-foreground">
               {title}
-              {count && (
+              {Boolean(count) && (
                 <span className="whitespace-nowrap font-normal text-muted-foreground">
                   {' '}
                   {count}
@@ -100,7 +105,13 @@ export function OverallStatus({ monitors, state, maintenances }: OverallStatusPr
               )}
             </h2>
             <Badge variant={config.badgeVariant} className="shrink-0">
-              {[`${up} up`, late > 0 && `${late} late`, slow > 0 && `${slow} slow`, `${down} down`]
+              {[
+                `${up} up`,
+                late > 0 && `${late} late`,
+                slow > 0 && `${slow} slow`,
+                expiry > 0 && `${expiry} expiry warning${expiry === 1 ? '' : 's'}`,
+                `${down} down`,
+              ]
                 .filter(Boolean)
                 .join(' / ')}
             </Badge>

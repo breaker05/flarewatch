@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
 import { IconExternalLink, IconChevronRight, IconEyeOff } from '@tabler/icons-react';
 import type { HeartbeatStatus } from '@flarewatch/shared';
@@ -6,6 +6,7 @@ import { formatUtcShort } from '@flarewatch/shared';
 import { UPTIME_DAYS } from '@/lib/constants';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { UptimeBadge } from '@/components/ui/uptime-badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { StatusBar } from '@/components/status-bar';
 import { RowBars, barsSummary } from '@/components/row-bars';
@@ -16,6 +17,7 @@ import { CopyPingUrlButton } from '@/components/copy-ping-url-button';
 import { getHeartbeatPingUrl } from '@/lib/heartbeat-ping-url';
 import type { LatencySample, Maintenance, StatusView } from '@flarewatch/shared';
 import { useMonitorStatus } from '@/lib/hooks/use-monitor-status';
+import { uptimeTone } from '@/lib/color';
 import type { AdminMonitor } from '@/lib/public-view';
 import { deriveHeartbeat, type HeartbeatView } from '@/lib/heartbeat';
 import { monitorState, type MonitorState } from '@/lib/monitor-state';
@@ -36,14 +38,6 @@ const PHASE_STATUS_LABELS: Record<HeartbeatStatus, string> = {
 const CHECK_STATUS_LABELS: Partial<Record<MonitorState, string>> = {
   down: 'not operational',
   degraded: 'responding slowly',
-};
-
-const STATE_BADGE_CLASS: Record<MonitorState, string> = {
-  up: 'text-status-operational border-status-operational',
-  running: 'text-status-operational border-status-operational',
-  degraded: 'text-status-degraded-text border-status-degraded',
-  down: 'text-status-down-text border-status-down',
-  pending: 'text-muted-foreground border-border',
 };
 
 function UtcTime({ sec, className }: { sec: number; className?: string }) {
@@ -75,15 +69,8 @@ interface DetailRow {
   full?: boolean;
 }
 
-function HeartbeatBody({
-  monitor,
-  heartbeat,
-}: {
-  monitor: AdminMonitor;
-  heartbeat: HeartbeatView;
-}) {
-  const { phase, startedSec, deadlineSec, nextDueSec, lastDurationSec, nowSec } = heartbeat;
-  const isFail = heartbeat.lastResult === 'fail';
+function activeHeartbeatRows(heartbeat: HeartbeatView): DetailRow[] {
+  const { phase, startedSec, deadlineSec, lastDurationSec, nowSec } = heartbeat;
 
   const rows: DetailRow[] = [];
 
@@ -111,7 +98,16 @@ function HeartbeatBody({
         valueClassName: 'text-status-degraded-text',
       });
     }
-  } else if (phase === 'down' && isFail) {
+  }
+
+  return rows;
+}
+
+function completedHeartbeatRows(heartbeat: HeartbeatView): DetailRow[] {
+  const { phase, deadlineSec, nextDueSec, lastDurationSec, nowSec } = heartbeat;
+  const isFail = heartbeat.lastResult === 'fail';
+  const rows: DetailRow[] = [];
+  if (phase === 'down' && isFail) {
     if (lastDurationSec !== undefined) {
       rows.push({
         label: 'Failed after',
@@ -149,6 +145,22 @@ function HeartbeatBody({
       rows.push({ label: 'Next due', value: <UtcTime sec={dueSec} /> });
     }
   }
+
+  return rows;
+}
+
+function HeartbeatBody({
+  monitor,
+  heartbeat,
+}: {
+  monitor: AdminMonitor;
+  heartbeat: HeartbeatView;
+}) {
+  const { phase } = heartbeat;
+  const rows =
+    phase === 'running' || phase === 'late'
+      ? activeHeartbeatRows(heartbeat)
+      : completedHeartbeatRows(heartbeat);
 
   if (heartbeat.message) {
     rows.push({
@@ -218,14 +230,17 @@ function rowLabel({
   heartbeat,
   shown,
   uptime,
+  warning,
 }: {
   name: string;
   heartbeat: HeartbeatView | null;
   shown: MonitorState;
   uptime: string;
+  warning: string | undefined;
 }): string {
   if (!heartbeat) {
-    const status = CHECK_STATUS_LABELS[shown] ?? 'operational';
+    const status =
+      shown === 'degraded' && warning ? warning : (CHECK_STATUS_LABELS[shown] ?? 'operational');
     return `${name}, ${status}, ${uptime}`;
   }
 
@@ -239,19 +254,19 @@ function rowLabel({
 
 function MonitorSubLines({
   error,
+  warning,
   heartbeat,
   latency,
   slowOverMs,
   operator,
 }: {
   error: string | null;
+  warning: string | undefined;
   heartbeat: HeartbeatView | null;
   latency: { ping: number; loc: string } | null;
   slowOverMs: number | undefined;
   operator: boolean;
 }) {
-  const lateDeadline = heartbeat?.phase === 'late' ? heartbeat.deadlineSec : undefined;
-  const runningStart = heartbeat?.phase === 'running' ? heartbeat.startedSec : undefined;
   const reportedFailure = heartbeat?.phase === 'down' && heartbeat.lastResult === 'fail';
   const overdueDeadline =
     heartbeat?.phase === 'down' && heartbeat.lastResult !== 'fail'
@@ -260,6 +275,11 @@ function MonitorSubLines({
 
   return (
     <>
+      {warning && (
+        <p className="text-xs text-status-degraded-text line-clamp-2 wrap-break-word mt-0.5">
+          {warning}
+        </p>
+      )}
       {error && !reportedFailure && !(overdueDeadline !== undefined && !operator) && (
         <p className="text-xs text-status-down-text line-clamp-2 wrap-break-word mt-0.5">{error}</p>
       )}
@@ -273,6 +293,20 @@ function MonitorSubLines({
           {`Overdue, was expected by ${formatUtcShort(overdueDeadline)}`}
         </p>
       )}
+      <MonitorTimingLines heartbeat={heartbeat} latency={latency} slowOverMs={slowOverMs} />
+    </>
+  );
+}
+
+function MonitorTimingLines({
+  heartbeat,
+  latency,
+  slowOverMs,
+}: Pick<ComponentProps<typeof MonitorSubLines>, 'heartbeat' | 'latency' | 'slowOverMs'>) {
+  const lateDeadline = heartbeat?.phase === 'late' ? heartbeat.deadlineSec : undefined;
+  const runningStart = heartbeat?.phase === 'running' ? heartbeat.startedSec : undefined;
+  return (
+    <>
       {lateDeadline !== undefined && (
         <p className="text-xs text-status-degraded-text mt-0.5">
           Running late, expected by <UtcTime sec={lateDeadline} />
@@ -410,36 +444,32 @@ function MonitorSummary({
   detail,
   history,
 }: MonitorViewProps & { detail: boolean; history?: string }) {
-  const { uptimePercent, error, latency, statusColor } = useMonitorStatus(monitor.id, state);
+  const { uptimePercent, error, latency } = useMonitorStatus(monitor.id, state);
   const shown = monitorState(monitor, state, maintenances);
   const heartbeat = deriveHeartbeat(monitor, state);
-  const slowOverMs = !heartbeat && shown === 'degraded' ? monitor.maxLatencyMs : undefined;
+  const warning = shown === 'degraded' ? state.monitors[monitor.id]?.warning : undefined;
+  const slowOverMs =
+    !heartbeat && shown === 'degraded' && !warning ? monitor.maxLatencyMs : undefined;
   const hasStarted = state.monitors[monitor.id]?.startedAt !== undefined;
   const uptimeDisplay = formatUptimeDisplay(uptimePercent, hasStarted, 2);
 
   const uptimeBadge = (
-    <Badge
-      variant="outline"
-      className={cn(
-        'font-mono',
-        heartbeat ? STATE_BADGE_CLASS[shown] : cn(statusColor.text, statusColor.border),
-      )}
-    >
+    <UptimeBadge tone={uptimeTone(heartbeat !== null, shown, uptimePercent)}>
       {uptimeDisplay}
-    </Badge>
+    </UptimeBadge>
   );
 
   return (
     <div
-      className="flex items-start gap-2.5"
-      style={{ viewTransitionName: `monitor-${monitor.id.replace(/[^\w-]/g, '_')}` }}
+      className="flex items-start gap-2.5 [view-transition-name:var(--vt)]"
+      style={{ '--vt': `monitor-${monitor.id.replace(/[^\w-]/g, '_')}` }}
     >
       {!detail && (
         <Link
           to="/monitors/$monitorId"
           params={{ monitorId: monitor.id }}
-          className="absolute inset-0 z-10 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
-          aria-label={`${rowLabel({ name: monitor.name, heartbeat, shown, uptime: uptimeDisplay })}, ${history}`}
+          className="absolute inset-0 z-10 outline-none focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:ring-inset"
+          aria-label={`${rowLabel({ name: monitor.name, heartbeat, shown, uptime: uptimeDisplay, warning })}, ${history}`}
         />
       )}
       <div className="shrink-0 mt-0.5">
@@ -453,6 +483,7 @@ function MonitorSummary({
 
         <MonitorSubLines
           error={shown === 'down' && error ? error : null}
+          warning={warning}
           heartbeat={heartbeat}
           latency={latency}
           slowOverMs={slowOverMs}
@@ -520,7 +551,7 @@ export function MonitorDetail({
   const heartbeat = deriveHeartbeat(monitor, state);
 
   return (
-    <Card className="@container p-0">
+    <Card size="flush" className="@container">
       <div className="px-4 pt-4">
         <MonitorSummary
           monitor={monitor}

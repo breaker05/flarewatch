@@ -2,21 +2,12 @@ import { describe, expect, it } from 'vite-plus/test';
 import type { Maintenance, MonitorView, StatusView } from '@flarewatch/shared';
 import type { PublicMonitor } from '@/lib/public-view';
 import { projectBadgeStatus, projectPublicData, projectTimeline } from '@/lib/status-projection';
+import { statusView } from '../helpers/status-view';
 
-function createState(
+const createState = (
   monitors: Record<string, Partial<MonitorView>> = {},
   lastUpdate = 1_789_000_000,
-): StatusView {
-  return {
-    lastUpdate,
-    monitors: Object.fromEntries(
-      Object.entries(monitors).map(([id, monitor]) => [
-        id,
-        { status: 'up', incidents: [], ...monitor },
-      ]),
-    ),
-  };
-}
+): StatusView => statusView(monitors, lastUpdate);
 
 function publicMonitor(id: string, name = id): PublicMonitor {
   return { id, method: 'GET', name };
@@ -39,6 +30,18 @@ function maintenance(id: string, start: string, end?: string, monitors?: string[
 }
 
 describe('status projection', () => {
+  it('projects expiry warnings as degraded in data and badge output', () => {
+    const state = createState({
+      api: { status: 'degraded', warning: 'Certificate expires soon', startedAt: 1788000000 },
+    });
+    expect(projectPublicData([publicMonitor('api')], state, []).monitors.api).toMatchObject({
+      status: 'degraded',
+      up: true,
+      message: 'Certificate expires soon',
+    });
+    expect(projectBadgeStatus(publicMonitor('api'), state, [])).toEqual({ status: 'degraded' });
+    expect(projectPublicData([publicMonitor('api')], state, [])).toMatchObject({ up: 1, down: 0 });
+  });
   it('projects public data without exposing raw monitor state', () => {
     const state = createState({
       api: { startedAt: 1_788_000_000, latest: { loc: 'SFO', ping: 42, time: 1_789_000_000 } },

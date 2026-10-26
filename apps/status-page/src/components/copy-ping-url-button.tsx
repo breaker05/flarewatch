@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
 import { IconCheck, IconCopy } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,9 +13,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils';
 
 const COPIED_MS = 2000;
-const ICON_FADE = 'transition-[opacity,filter,scale] duration-300 ease-[cubic-bezier(0.2,0,0,1)]';
-const ICON_SHOWN = 'scale-100 opacity-100 blur-0';
-const ICON_HIDDEN = 'scale-[0.25] opacity-0 blur-[4px]';
+const ICON_FADE = 'transition-props-reveal duration-300 ease-standard';
+const ICON_SHOWN = 'scale-100 opacity-100 blur-none';
+const ICON_HIDDEN = 'scale-[0.25] opacity-0 blur-xs';
 
 interface CopyPingUrlButtonProps {
   monitorId: string;
@@ -35,34 +34,44 @@ export function CopyPingUrlButton({ monitorId, monitorName, loadPingUrl }: CopyP
     };
   }, []);
 
-  const copyMutation = useMutation({
-    mutationFn: () => loadPingUrl(monitorId),
-    onSuccess: async (url) => {
-      if (!url) return;
-      try {
-        await navigator.clipboard.writeText(url);
-        setCopied(true);
-        copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS);
-      } catch {
-        setManualUrl(url);
+  const [isPending, setIsPending] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+
+  async function copy() {
+    setIsPending(true);
+    setUnavailable(false);
+    try {
+      const url = await loadPingUrl(monitorId);
+      if (!url) {
+        setUnavailable(true);
+      } else {
+        try {
+          await navigator.clipboard.writeText(url);
+          setCopied(true);
+          copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS);
+        } catch {
+          setManualUrl(url);
+        }
       }
-    },
-  });
-  const unavailable = copyMutation.isError || copyMutation.data === null;
+    } catch {
+      setUnavailable(true);
+    }
+    setIsPending(false);
+  }
 
   const button = (
     <Button
       variant="ghost"
       size="icon-sm"
-      disabled={copyMutation.isPending}
+      disabled={isPending}
       aria-label={`Copy ping URL for ${monitorName}`}
-      onClick={() => copyMutation.mutate()}
+      onClick={() => void copy()}
     >
       <span className="relative inline-flex">
         <IconCheck
           aria-hidden="true"
           className={cn(
-            'absolute inset-0 size-4 text-status-operational',
+            'absolute inset-0 size-4 text-status-operational-text',
             ICON_FADE,
             copied ? ICON_SHOWN : ICON_HIDDEN,
           )}
@@ -96,7 +105,7 @@ export function CopyPingUrlButton({ monitorId, monitorName, loadPingUrl }: CopyP
           <Input
             readOnly
             value={manualUrl ?? ''}
-            className="font-mono text-xs"
+            variant="mono"
             onFocus={(e) => e.currentTarget.select()}
           />
           <div className="flex justify-end">

@@ -61,6 +61,7 @@ export function MaintenanceFormDialog({
   const createMutation = useCreateMaintenance(callbacks);
   const updateMutation = useUpdateMaintenance(callbacks);
   const isPending = createMutation.isPending || updateMutation.isPending;
+  const selectedMonitors = new Set(formData.monitors);
 
   function handleSubmit() {
     const { start } = formData;
@@ -119,7 +120,7 @@ export function MaintenanceFormDialog({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <Label className="text-xs text-muted-foreground">Start *</Label>
+              <Label variant="muted">Start *</Label>
               <DateTimePicker
                 value={formData.start}
                 onChange={(date) => updateField('start', date)}
@@ -127,7 +128,7 @@ export function MaintenanceFormDialog({
               />
             </div>
             <div>
-              <Label className="text-xs text-muted-foreground">End</Label>
+              <Label variant="muted">End</Label>
               <DateTimePicker
                 value={formData.end}
                 onChange={(date) => updateField('end', date)}
@@ -140,7 +141,7 @@ export function MaintenanceFormDialog({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <Label htmlFor="repeat" className="text-xs text-muted-foreground">
+              <Label htmlFor="repeat" variant="muted">
                 Repeat
               </Label>
               <Select
@@ -168,7 +169,7 @@ export function MaintenanceFormDialog({
             </div>
             {formData.repeat && (
               <div>
-                <Label className="text-xs text-muted-foreground">Until</Label>
+                <Label variant="muted">Until</Label>
                 <DateTimePicker
                   value={formData.until}
                   onChange={(date) => updateField('until', date)}
@@ -188,7 +189,7 @@ export function MaintenanceFormDialog({
                   <Badge
                     key={name}
                     variant={formData.weekdays.includes(day) ? 'default' : 'outline'}
-                    className="h-7 w-full cursor-pointer px-1 aria-[pressed=false]:hover:bg-muted"
+                    className="h-7 w-full cursor-pointer"
                     onClick={() => toggleWeekday(day)}
                     render={<button type="button" aria-label={name} />}
                     aria-pressed={formData.weekdays.includes(day)}
@@ -204,7 +205,7 @@ export function MaintenanceFormDialog({
             <div className="grid gap-4 sm:grid-cols-2">
               {formData.repeat === 'month' && (
                 <div>
-                  <Label htmlFor="day-of-month" className="text-xs text-muted-foreground">
+                  <Label htmlFor="day-of-month" variant="muted">
                     Day of the month
                   </Label>
                   <Input
@@ -219,7 +220,7 @@ export function MaintenanceFormDialog({
                 </div>
               )}
               <div>
-                <Label htmlFor="time-zone" className="text-xs text-muted-foreground">
+                <Label htmlFor="time-zone" variant="muted">
                   Time zone
                 </Label>
                 <Input
@@ -261,16 +262,16 @@ export function MaintenanceFormDialog({
           </fieldset>
 
           <div>
-            <Label className="text-xs text-muted-foreground">Affected Monitors</Label>
+            <Label variant="muted">Affected Monitors</Label>
             <div className="mt-1.5 flex flex-wrap gap-2">
               {monitors.map((monitor) => (
                 <Badge
                   key={monitor.id}
-                  variant={formData.monitors.includes(monitor.id) ? 'default' : 'outline'}
+                  variant={selectedMonitors.has(monitor.id) ? 'default' : 'outline'}
                   className="cursor-pointer"
                   onClick={() => toggleMonitor(monitor.id)}
                   render={<button type="button" aria-label={monitor.name} />}
-                  aria-pressed={formData.monitors.includes(monitor.id)}
+                  aria-pressed={selectedMonitors.has(monitor.id)}
                 >
                   {monitor.name}
                 </Badge>

@@ -1,5 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import type { Env } from '../../src/env';
+import { afterAll, expect, onTestFinished } from 'vite-plus/test';
 import { MonitorHub } from '../../src/hub/monitor-hub';
 
 /** Durable Object storage over an in-memory node:sqlite database. */
@@ -7,8 +7,17 @@ function createStorage(db: DatabaseSync, onQuery: (query: string) => void) {
   return {
     sql: {
       exec: (query: string, ...bindings: SQLInputValue[]) => {
-        onQuery(query);
-        const rows = db.prepare(query).all(...bindings);
+        let statement = db.prepare(query);
+        let rest = query.slice(statement.sourceSQL.length).trim();
+        while (rest) {
+          onQuery(statement.sourceSQL);
+          statement.run();
+          query = rest;
+          statement = db.prepare(query);
+          rest = query.slice(statement.sourceSQL.length).trim();
+        }
+        onQuery(statement.sourceSQL);
+        const rows = statement.all(...bindings);
         return { toArray: () => rows };
       },
     },
@@ -27,11 +36,26 @@ function createStorage(db: DatabaseSync, onQuery: (query: string) => void) {
   };
 }
 
+const owned = new WeakSet<DatabaseSync>();
+
+/** Closes `db` when the test that opened it ends, or after the file when no test is running. */
+function own(db: DatabaseSync): void {
+  if (owned.has(db)) return;
+  owned.add(db);
+  const close = () => {
+    if (db.isOpen) db.close();
+  };
+  if (expect.getState().currentTestName === undefined) afterAll(close);
+  else onTestFinished(close);
+}
+
 /**
  * Past migrations, a query that would scan every incident fails the test, as
  * when it loses its index. The workerd tests measure the rows Durable Objects bill.
+ * A hub reopened over the same `db` shares its owner.
  */
-export function createHub(env: Env = {}, db = new DatabaseSync(':memory:')) {
+export function createHub(db = new DatabaseSync(':memory:')) {
+  own(db);
   let migrated = false;
   const ctx = {
     storage: createStorage(db, (query) => {
@@ -43,7 +67,7 @@ export function createHub(env: Env = {}, db = new DatabaseSync(':memory:')) {
   };
   // SAFETY: the hub touches only ctx.storage.sql.exec and ctx.storage.transactionSync,
   // which the fake implements.
-  const hub = new MonitorHub(ctx as typeof ctx & DurableObjectState, env);
+  const hub = new MonitorHub(ctx as typeof ctx & DurableObjectState, {});
   migrated = true;
   return { hub, db };
 }
