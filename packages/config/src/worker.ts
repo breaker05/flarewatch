@@ -22,6 +22,7 @@ export const workerConfig: WorkerConfig = {
       name: 'Dash API - Infrastructure',
       method: 'GET',
       target: 'https://api.dashmarketing.io/health/ready',
+      private: true,
       expectedCodes: [200],
       timeout: 10000,
       downAfterChecks: 3,
